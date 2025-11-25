@@ -128,6 +128,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 
@@ -226,46 +230,45 @@ You should see the AMI ID that will be used.
 
 ### Part 4: Generate SSH Key Pair (20 minutes)
 
-EC2 instances use SSH keys for secure access. We'll generate a key pair locally and import the public key to AWS.
+EC2 instances use SSH keys for secure access. We'll use Terraform's `tls_private_key` resource to generate the key pair, which simplifies setup and works consistently across all environments.
 
-#### 4.1 Generate Local SSH Key
+#### 4.1 Add TLS Provider
 
-```bash
-# Create SSH key with no passphrase (for learning purposes)
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/wordpress-lab -N ""
+First, add the TLS provider to your `main.tf` (update the existing `terraform` block):
+
+```hcl
+# Terraform version and provider requirements
+terraform {
+  required_version = ">= 1.9.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+  }
+}
 ```
 
-This creates:
-- Private key: `~/.ssh/wordpress-lab` (keep this secret!)
-- Public key: `~/.ssh/wordpress-lab.pub` (safe to share with AWS)
-
-**On Windows (PowerShell):**
-```powershell
-ssh-keygen -t rsa -b 4096 -f $env:USERPROFILE\.ssh\wordpress-lab -N '""'
-```
-
-**Verify the keys were created:**
-```bash
-ls -l ~/.ssh/wordpress-lab*
-```
-
-#### 4.2 Set Proper Permissions (Linux/macOS)
-
-SSH requires private keys to have restrictive permissions:
-
-```bash
-chmod 600 ~/.ssh/wordpress-lab
-```
-
-#### 4.3 Import Public Key to AWS
+#### 4.2 Generate Key Pair with Terraform
 
 Add to `main.tf`:
 
 ```hcl
-# Import SSH public key to AWS
+# Generate SSH key pair using Terraform
+resource "tls_private_key" "wordpress" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+# Upload the public key to AWS
 resource "aws_key_pair" "wordpress" {
   key_name   = "wordpress-${var.student_name}"
-  public_key = file("~/.ssh/wordpress-lab.pub")
+  public_key = tls_private_key.wordpress.public_key_openssh
 
   tags = {
     Name         = "WordPress SSH Key - ${var.student_name}"
@@ -277,11 +280,49 @@ resource "aws_key_pair" "wordpress" {
 }
 ```
 
-**Understanding this resource:**
-- `file()` function reads the public key from your filesystem
-- The public key gets uploaded to AWS
-- The private key NEVER leaves your computer
-- You'll reference this key when creating the instance
+**Understanding this approach:**
+- `tls_private_key` generates an RSA key pair in memory
+- The public key is uploaded to AWS via `aws_key_pair`
+- The private key is stored in Terraform state (encrypted in S3)
+- We'll output the private key so you can save it locally for SSH access
+
+#### 4.3 Add Private Key Output
+
+Add to `outputs.tf`:
+
+```hcl
+output "private_key_pem" {
+  description = "Private key for SSH access (save to file)"
+  value       = tls_private_key.wordpress.private_key_pem
+  sensitive   = true
+}
+```
+
+#### 4.4 Save the Private Key Locally (After Apply)
+
+After running `terraform apply`, save the private key to use for SSH:
+
+```bash
+# Save the private key to a file
+terraform output -raw private_key_pem > ~/.ssh/wordpress-lab
+
+# Set proper permissions (required by SSH)
+chmod 600 ~/.ssh/wordpress-lab
+
+# Verify it was saved
+ls -la ~/.ssh/wordpress-lab
+```
+
+**On Windows (PowerShell):**
+```powershell
+terraform output -raw private_key_pem | Out-File -Encoding ascii $env:USERPROFILE\.ssh\wordpress-lab
+```
+
+**Why this approach?**
+- No manual key generation required
+- Works in CI/CD pipelines (for validation)
+- Key is tied to the Terraform state, so it's recreated if you destroy/apply
+- Consistent across all operating systems
 
 ---
 
@@ -633,6 +674,12 @@ output "security_group_id" {
   description = "ID of the security group"
   value       = aws_security_group.wordpress.id
 }
+
+output "private_key_pem" {
+  description = "Private key for SSH access - save to ~/.ssh/wordpress-lab"
+  value       = tls_private_key.wordpress.private_key_pem
+  sensitive   = true
+}
 ```
 
 ---
@@ -659,7 +706,7 @@ terraform plan
 ```
 
 **What to look for in the plan:**
-- 3 resources to create: key_pair, security_group, instance
+- 4 resources to create: tls_private_key, key_pair, security_group, instance
 - 1 data source to read: AMI
 - Security group has 3 ingress rules (SSH, HTTP, HTTPS) and 1 egress rule
 - Instance uses your key pair and security group
@@ -675,7 +722,7 @@ Type `yes` when prompted.
 
 **Expected output:**
 ```
-Apply complete! Resources: 3 added, 0 changed, 0 destroyed.
+Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
 
 Outputs:
 
@@ -688,7 +735,19 @@ ssh_command = "ssh -i ~/.ssh/wordpress-lab ec2-user@54.123.45.67"
 wordpress_url = "http://54.123.45.67"
 ```
 
-#### 9.4 Wait for WordPress Installation
+#### 9.4 Save the SSH Private Key
+
+The private key was generated by Terraform. Save it locally to use for SSH:
+
+```bash
+# Save the private key
+terraform output -raw private_key_pem > ~/.ssh/wordpress-lab
+
+# Set proper permissions
+chmod 600 ~/.ssh/wordpress-lab
+```
+
+#### 9.5 Wait for WordPress Installation
 
 **IMPORTANT:** The user data script takes 2-3 minutes to complete. The instance will be "running" almost immediately, but WordPress won't be ready yet.
 
@@ -703,7 +762,7 @@ aws ec2 describe-instances \
 
 Should show: `running`
 
-#### 9.5 Access WordPress
+#### 9.6 Access WordPress
 
 After waiting 2-3 minutes, open your browser and go to:
 
