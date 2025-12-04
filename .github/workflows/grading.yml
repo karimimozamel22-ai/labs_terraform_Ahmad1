@@ -14,569 +14,321 @@ permissions:
 jobs:
   grade:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout student code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ">=1.9.0"
-      
+          terraform_wrapper: false
+
       - name: Setup Infracost
         uses: infracost/actions/setup@v2
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
-      
+
       - name: Install grading tools
         run: |
-          # Install jq for JSON parsing
           sudo apt-get update && sudo apt-get install -y jq
-          
-          # Install tflint (optional but recommended)
-          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
-          
-          # Install checkov for security scanning
+
+          # Install conftest for lab-specific policy checks
+          CONFTEST_VERSION="0.46.0"
+          curl -sL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" | tar xz
+          sudo mv conftest /usr/local/bin/
+
+          # Keep checkov as fallback for labs without custom policies
           pip3 install checkov
-      
+
       - name: Determine lab directory
         id: lab-info
         run: |
-          # Extract lab directory from changed files
           CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
           LAB_DIR=$(echo "$CHANGED_FILES" | grep -oP 'week-\d+/lab-\d+' | head -1 || echo "")
-          
+
           if [ -z "$LAB_DIR" ]; then
             echo "::error::Could not determine lab directory from changed files"
             exit 1
           fi
-          
-          # Extract week and lab numbers
+
           WEEK=$(echo "$LAB_DIR" | grep -oP 'week-\K\d+')
           LAB=$(echo "$LAB_DIR" | grep -oP 'lab-\K\d+')
-          
+
           echo "lab_dir=$LAB_DIR" >> $GITHUB_OUTPUT
           echo "week=$WEEK" >> $GITHUB_OUTPUT
           echo "lab=$LAB" >> $GITHUB_OUTPUT
           echo "work_dir=$LAB_DIR/student-work" >> $GITHUB_OUTPUT
-          
+          echo "validator_dir=$LAB_DIR/.validator" >> $GITHUB_OUTPUT
+
           echo "📚 Grading: Week $WEEK, Lab $LAB"
-          echo "📁 Directory: $LAB_DIR/student-work"
-      
-      - name: Initialize grading results
-        id: init-results
+          echo "📁 Student work: $LAB_DIR/student-work"
+          echo "📋 Validator: $LAB_DIR/.validator"
+
+      - name: Check for grading script
+        id: check-grader
         run: |
-          # Initialize score tracking file
-          cat > /tmp/grading.json <<EOF
-          {
-            "week": "${{ steps.lab-info.outputs.week }}",
-            "lab": "${{ steps.lab-info.outputs.lab }}",
-            "student": "${{ github.event.pull_request.user.login }}",
-            "pr_number": "${{ github.event.pull_request.number }}",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "categories": {
-              "code_quality": {"max": 25, "earned": 0, "checks": []},
-              "functionality": {"max": 30, "earned": 0, "checks": []},
-              "cost_management": {"max": 20, "earned": 0, "checks": []},
-              "security": {"max": 15, "earned": 0, "checks": []},
-              "documentation": {"max": 10, "earned": 0, "checks": []}
-            },
-            "total": {"max": 100, "earned": 0},
-            "errors": [],
-            "warnings": []
-          }
-          EOF
-          
-          echo "✅ Grading system initialized"
-      
-      # ==================== CODE QUALITY (25 points) ====================
-      
-      - name: Check Terraform formatting
-        id: fmt
-        continue-on-error: true
-        working-directory: ${{ steps.lab-info.outputs.work_dir }}
-        run: |
-          if terraform fmt -check -recursive .; then
-            echo "status=pass" >> $GITHUB_OUTPUT
-            echo "points=5" >> $GITHUB_OUTPUT
-            echo "✅ Terraform formatting check passed"
+          GRADE_SCRIPT="${{ steps.lab-info.outputs.validator_dir }}/grade.sh"
+
+          if [ -f "$GRADE_SCRIPT" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Found grading script: $GRADE_SCRIPT"
           else
-            echo "status=fail" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-            echo "::warning::Terraform formatting check failed. Run 'terraform fmt' to fix."
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "::error::No grading script found at $GRADE_SCRIPT"
+            exit 1
           fi
-      
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-      
+
+      - name: Run lab-specific setup
+        run: |
+          SETUP_SCRIPT="${{ steps.lab-info.outputs.validator_dir }}/setup.sh"
+
+          echo "📁 Current directory: $(pwd)"
+          echo "📁 Looking for setup script at: $SETUP_SCRIPT"
+          echo "📁 Validator dir contents:"
+          ls -la "${{ steps.lab-info.outputs.validator_dir }}" || echo "Directory not found"
+
+          if [ -f "$SETUP_SCRIPT" ]; then
+            echo "🔧 Running lab-specific setup..."
+            chmod +x "$SETUP_SCRIPT"
+            bash "$SETUP_SCRIPT"
+          else
+            echo "ℹ️  No lab-specific setup script found (optional)"
+          fi
+
+          # Ensure SSH key exists for labs that need it (fallback)
+          if [ ! -f ~/.ssh/wordpress-lab.pub ]; then
+            echo "📝 Creating fallback SSH key pair for terraform..."
+            mkdir -p ~/.ssh
+            ssh-keygen -t rsa -b 4096 -f ~/.ssh/wordpress-lab -N "" -q
+            echo "✅ SSH key pair created as fallback"
+          fi
+
+          # Verify the setup worked
+          echo "📁 Checking ~/.ssh directory:"
+          ls -la ~/.ssh/ || echo "~/.ssh not found"
+
       - name: Initialize Terraform
         working-directory: ${{ steps.lab-info.outputs.work_dir }}
         run: terraform init
-      
-      - name: Validate Terraform configuration
-        id: validate
-        continue-on-error: true
-        working-directory: ${{ steps.lab-info.outputs.work_dir }}
-        run: |
-          if terraform validate; then
-            echo "status=pass" >> $GITHUB_OUTPUT
-            echo "points=5" >> $GITHUB_OUTPUT
-            echo "✅ Terraform validation passed"
-          else
-            echo "status=fail" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-            echo "::error::Terraform validation failed"
-          fi
-      
-      - name: Check for hardcoded credentials
-        id: credentials
-        continue-on-error: true
-        working-directory: ${{ steps.lab-info.outputs.work_dir }}
-        run: |
-          # Check for common patterns of hardcoded credentials
-          ISSUES=0
-          
-          if grep -r "aws_access_key_id\s*=\s*\"[A-Z0-9]" . 2>/dev/null; then
-            echo "::error::Found hardcoded AWS access key"
-            ISSUES=$((ISSUES + 1))
-          fi
-          
-          if grep -r "aws_secret_access_key\s*=\s*\"" . 2>/dev/null; then
-            echo "::error::Found hardcoded AWS secret key"
-            ISSUES=$((ISSUES + 1))
-          fi
-          
-          if grep -r "password\s*=\s*\"[^$]" . 2>/dev/null | grep -v "random_password"; then
-            echo "::warning::Found potential hardcoded password"
-            ISSUES=$((ISSUES + 1))
-          fi
-          
-          if [ $ISSUES -eq 0 ]; then
-            echo "status=pass" >> $GITHUB_OUTPUT
-            echo "points=5" >> $GITHUB_OUTPUT
-            echo "✅ No hardcoded credentials found"
-          else
-            echo "status=fail" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-            echo "::error::Found $ISSUES potential credential issues"
-          fi
-      
-      - name: Check naming conventions and tags
-        id: naming
-        continue-on-error: true
-        working-directory: ${{ steps.lab-info.outputs.work_dir }}
-        run: |
-          ISSUES=0
-          
-          # Check if all .tf files exist
-          if [ ! -f "main.tf" ]; then
-            echo "::warning::main.tf not found"
-            ISSUES=$((ISSUES + 1))
-          fi
-          
-          # Check for required tags in all resources (we'll parse this properly in lab-specific checks)
-          REQUIRED_TAGS="Name Environment ManagedBy Student AutoTeardown"
-          
-          if [ $ISSUES -eq 0 ]; then
-            echo "status=pass" >> $GITHUB_OUTPUT
-            echo "points=5" >> $GITHUB_OUTPUT
-            echo "✅ Naming conventions check passed"
-          else
-            echo "status=partial" >> $GITHUB_OUTPUT
-            echo "points=3" >> $GITHUB_OUTPUT
-            echo "::warning::Some naming convention issues found"
-          fi
-      
-      - name: Check Terraform version requirement
-        id: version-check
-        continue-on-error: true
-        working-directory: ${{ steps.lab-info.outputs.work_dir }}
-        run: |
-          if grep -q 'required_version.*1\.9' main.tf; then
-            echo "status=pass" >> $GITHUB_OUTPUT
-            echo "points=5" >> $GITHUB_OUTPUT
-            echo "✅ Terraform version requirement found"
-          else
-            echo "status=fail" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-            echo "::warning::Missing or incorrect Terraform version requirement (>= 1.9.0)"
-          fi
-      
-      # ==================== FUNCTIONALITY (30 points) ====================
-      
+
       - name: Generate Terraform plan
         id: plan
         continue-on-error: true
         working-directory: ${{ steps.lab-info.outputs.work_dir }}
         run: |
-          terraform plan -out=tfplan -no-color 2>&1 | tee /tmp/plan.txt
-          terraform show -json tfplan > /tmp/plan.json
-          
+          RUNNER_IP=$(curl -s https://ifconfig.me)
+          echo "🌐 Using runner IP for validation: $RUNNER_IP"
+
+          terraform plan -out=tfplan -no-color \
+            -var="student_name=${{ github.event.pull_request.user.login }}" \
+            -var="my_ip=${RUNNER_IP}/32" \
+            2>&1 | tee /tmp/plan.txt
+
           if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            terraform show -json tfplan > /tmp/plan.json
             echo "status=pass" >> $GITHUB_OUTPUT
             echo "✅ Terraform plan generated successfully"
           else
+            echo "{}" > /tmp/plan.json
             echo "status=fail" >> $GITHUB_OUTPUT
-            echo "::error::Terraform plan failed"
+            echo "::warning::Terraform plan failed"
           fi
-      
-      - name: Run lab-specific validation
-        id: lab-validation
-        continue-on-error: true
-        run: |
-          VALIDATOR_SCRIPT="${{ steps.lab-info.outputs.lab_dir }}/.validator/validate.sh"
-          
-          if [ -f "$VALIDATOR_SCRIPT" ]; then
-            echo "📋 Running lab-specific validator..."
-            chmod +x "$VALIDATOR_SCRIPT"
-            
-            cd "${{ steps.lab-info.outputs.work_dir }}"
-            if bash "../.validator/validate.sh" /tmp/plan.json; then
-              echo "status=pass" >> $GITHUB_OUTPUT
-              echo "points=20" >> $GITHUB_OUTPUT
-              echo "✅ Lab-specific validation passed"
-            else
-              echo "status=fail" >> $GITHUB_OUTPUT
-              echo "points=0" >> $GITHUB_OUTPUT
-              echo "::error::Lab-specific validation failed"
-            fi
-          else
-            echo "::warning::No lab-specific validator found at $VALIDATOR_SCRIPT"
-            echo "status=skip" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Check outputs are defined
-        id: outputs
-        continue-on-error: true
-        working-directory: ${{ steps.lab-info.outputs.work_dir }}
-        run: |
-          if [ -f "outputs.tf" ] && [ -s "outputs.tf" ]; then
-            OUTPUT_COUNT=$(grep -c "^output " outputs.tf || echo 0)
-            if [ $OUTPUT_COUNT -gt 0 ]; then
-              echo "status=pass" >> $GITHUB_OUTPUT
-              echo "points=5" >> $GITHUB_OUTPUT
-              echo "✅ Outputs defined ($OUTPUT_COUNT outputs found)"
-            else
-              echo "status=fail" >> $GITHUB_OUTPUT
-              echo "points=0" >> $GITHUB_OUTPUT
-              echo "::warning::No outputs defined in outputs.tf"
-            fi
-          else
-            echo "status=fail" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-            echo "::warning::outputs.tf not found or empty"
-          fi
-      
-      - name: Verify resource changes are reasonable
-        id: resource-check
-        continue-on-error: true
-        run: |
-          # Parse plan JSON to check resource counts
-          if [ -f /tmp/plan.json ]; then
-            RESOURCES_TO_ADD=$(jq '[.resource_changes[] | select(.change.actions[] == "create")] | length' /tmp/plan.json)
-            RESOURCES_TO_CHANGE=$(jq '[.resource_changes[] | select(.change.actions[] == "update")] | length' /tmp/plan.json)
-            RESOURCES_TO_DESTROY=$(jq '[.resource_changes[] | select(.change.actions[] == "delete")] | length' /tmp/plan.json)
-            
-            echo "📊 Plan Summary:"
-            echo "  - Resources to add: $RESOURCES_TO_ADD"
-            echo "  - Resources to change: $RESOURCES_TO_CHANGE"
-            echo "  - Resources to destroy: $RESOURCES_TO_DESTROY"
-            
-            if [ $RESOURCES_TO_ADD -gt 0 ]; then
-              echo "status=pass" >> $GITHUB_OUTPUT
-              echo "points=5" >> $GITHUB_OUTPUT
-              echo "✅ Plan includes resource creation"
-            else
-              echo "status=fail" >> $GITHUB_OUTPUT
-              echo "points=0" >> $GITHUB_OUTPUT
-              echo "::warning::No resources to create found in plan"
-            fi
-          else
-            echo "status=skip" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-          fi
-      
-      # ==================== COST MANAGEMENT (20 points) ====================
-      
+
       - name: Run Infracost
-        id: infracost
         continue-on-error: true
         working-directory: ${{ steps.lab-info.outputs.work_dir }}
         run: |
-          infracost breakdown --path . --format json --out-file /tmp/infracost.json
-          
-          if [ $? -eq 0 ]; then
-            echo "status=pass" >> $GITHUB_OUTPUT
-            echo "points=5" >> $GITHUB_OUTPUT
-            echo "✅ Infracost analysis completed"
-          else
-            echo "status=fail" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-            echo "::warning::Infracost analysis failed"
-          fi
-      
-      - name: Verify cost is within budget
-        id: cost-check
+          infracost breakdown --path . --format json --out-file /tmp/infracost.json 2>/dev/null || echo '{"totalMonthlyCost": "0"}' > /tmp/infracost.json
+
+      - name: Run policy checks (conftest/Rego)
         continue-on-error: true
         run: |
-          if [ -f /tmp/infracost.json ]; then
-            MONTHLY_COST=$(jq -r '.totalMonthlyCost // 0' /tmp/infracost.json)
-            
-            # Cost thresholds per lab (can be customized)
-            COST_LIMIT=5.00
-            
-            echo "💰 Estimated monthly cost: \$$MONTHLY_COST"
-            echo "💵 Budget limit: \$$COST_LIMIT"
-            
-            # Use awk for floating point comparison
-            if awk "BEGIN {exit !($MONTHLY_COST <= $COST_LIMIT)}"; then
-              echo "status=pass" >> $GITHUB_OUTPUT
-              echo "points=10" >> $GITHUB_OUTPUT
-              echo "✅ Cost is within budget"
-            else
-              echo "status=fail" >> $GITHUB_OUTPUT
-              echo "points=0" >> $GITHUB_OUTPUT
-              echo "::warning::Cost exceeds budget limit (\$$MONTHLY_COST > \$$COST_LIMIT)"
-            fi
+          POLICY_DIR="${{ steps.lab-info.outputs.validator_dir }}/policy"
+
+          if [ -d "$POLICY_DIR" ] && [ "$(ls -A $POLICY_DIR 2>/dev/null)" ]; then
+            echo "📋 Running lab-specific policy checks with conftest..."
+            conftest test /tmp/plan.json --policy "$POLICY_DIR" --output json > /tmp/conftest.json 2>&1 || true
+
+            # Convert conftest output to a format the grading script expects
+            # conftest output: array of results with failures/warnings/successes
+            cat /tmp/conftest.json | jq '{
+              results: {
+                passed_checks: [.[] | .successes[]? | {check_id: "POLICY", resource: .msg}],
+                failed_checks: [.[] | .failures[]? | {check_id: "POLICY", resource: .msg}],
+                warnings: [.[] | .warnings[]? | {check_id: "POLICY", resource: .msg}]
+              }
+            }' > /tmp/policy-results.json 2>/dev/null || echo '{"results": {"passed_checks": [], "failed_checks": [], "warnings": []}}' > /tmp/policy-results.json
+
+            echo "✅ Lab-specific policy checks complete"
+            cat /tmp/conftest.json
           else
-            echo "status=skip" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
+            echo "ℹ️  No lab-specific policies found, running generic Checkov scan..."
+            checkov -d "${{ steps.lab-info.outputs.work_dir }}" --framework terraform --output json --quiet > /tmp/policy-results.json 2>/dev/null || echo '{"results": {"passed_checks": [], "failed_checks": []}}' > /tmp/policy-results.json
           fi
-      
-      - name: Check AutoTeardown tag
-        id: teardown-check
-        continue-on-error: true
+
+      - name: Run grading script
+        id: grade
         run: |
-          if [ -f /tmp/plan.json ]; then
-            # Check if resources have AutoTeardown tag
-            HAS_TEARDOWN=$(jq -r '[.planned_values.root_module.resources[]? | select(.values.tags.AutoTeardown != null)] | length' /tmp/plan.json)
-            
-            if [ "$HAS_TEARDOWN" -gt 0 ]; then
-              echo "status=pass" >> $GITHUB_OUTPUT
-              echo "points=5" >> $GITHUB_OUTPUT
-              echo "✅ AutoTeardown tag found on resources"
-            else
-              echo "status=fail" >> $GITHUB_OUTPUT
-              echo "points=0" >> $GITHUB_OUTPUT
-              echo "::warning::AutoTeardown tag missing from resources"
-            fi
-          else
-            echo "status=skip" >> $GITHUB_OUTPUT
-            echo "points=0" >> $GITHUB_OUTPUT
-          fi
-      
-      # ==================== SECURITY (15 points) ====================
-      
-      - name: Run Checkov security scan
-        id: checkov
-        continue-on-error: true
-        working-directory: ${{ steps.lab-info.outputs.work_dir }}
-        run: |
-          checkov -d . --framework terraform --output json --quiet > /tmp/checkov.json || true
-          
-          FAILED_CHECKS=$(jq '.summary.failed // 0' /tmp/checkov.json)
-          PASSED_CHECKS=$(jq '.summary.passed // 0' /tmp/checkov.json)
-          
-          echo "🔒 Security scan results:"
-          echo "  - Passed: $PASSED_CHECKS"
-          echo "  - Failed: $FAILED_CHECKS"
-          
-          # Points based on failed checks (less is better)
-          if [ "$FAILED_CHECKS" -eq 0 ]; then
-            POINTS=15
-          elif [ "$FAILED_CHECKS" -le 3 ]; then
-            POINTS=10
-          elif [ "$FAILED_CHECKS" -le 5 ]; then
-            POINTS=5
-          else
-            POINTS=0
-          fi
-          
-          echo "status=pass" >> $GITHUB_OUTPUT
-          echo "points=$POINTS" >> $GITHUB_OUTPUT
-          echo "✅ Security scan completed (${POINTS}/15 points)"
-      
-      # ==================== DOCUMENTATION (10 points) ====================
-      
-      - name: Check for README or comments
-        id: documentation
-        continue-on-error: true
-        working-directory: ${{ steps.lab-info.outputs.work_dir }}
-        run: |
-          POINTS=0
-          
-          # Check for comments in Terraform files
-          COMMENT_LINES=$(grep -r "^\s*#" *.tf 2>/dev/null | wc -l || echo 0)
-          if [ "$COMMENT_LINES" -ge 5 ]; then
-            POINTS=$((POINTS + 5))
-            echo "✅ Sufficient comments found"
-          else
-            echo "::warning::Add more comments to explain your code"
-          fi
-          
-          # Check for README
-          if [ -f "README.md" ] && [ -s "README.md" ]; then
-            POINTS=$((POINTS + 5))
-            echo "✅ README.md found"
-          else
-            echo "::warning::Consider adding a README.md"
-          fi
-          
-          echo "status=pass" >> $GITHUB_OUTPUT
-          echo "points=$POINTS" >> $GITHUB_OUTPUT
-      
-      # ==================== CALCULATE FINAL GRADE ====================
-      
-      - name: Calculate final grade
-        id: calculate-grade
-        if: always()
-        run: |
-          # Sum up all points
-          TOTAL=0
-          
-          # Code Quality (25 points)
-          TOTAL=$((TOTAL + ${{ steps.fmt.outputs.points || 0 }}))
-          TOTAL=$((TOTAL + ${{ steps.validate.outputs.points || 0 }}))
-          TOTAL=$((TOTAL + ${{ steps.credentials.outputs.points || 0 }}))
-          TOTAL=$((TOTAL + ${{ steps.naming.outputs.points || 0 }}))
-          TOTAL=$((TOTAL + ${{ steps.version-check.outputs.points || 0 }}))
-          
-          # Functionality (30 points)
-          TOTAL=$((TOTAL + ${{ steps.lab-validation.outputs.points || 0 }}))
-          TOTAL=$((TOTAL + ${{ steps.outputs.outputs.points || 0 }}))
-          TOTAL=$((TOTAL + ${{ steps.resource-check.outputs.points || 0 }}))
-          
-          # Cost Management (20 points)
-          TOTAL=$((TOTAL + ${{ steps.infracost.outputs.points || 0 }}))
-          TOTAL=$((TOTAL + ${{ steps.cost-check.outputs.points || 0 }}))
-          TOTAL=$((TOTAL + ${{ steps.teardown-check.outputs.points || 0 }}))
-          
-          # Security (15 points)
-          TOTAL=$((TOTAL + ${{ steps.checkov.outputs.points || 0 }}))
-          
-          # Documentation (10 points)
-          TOTAL=$((TOTAL + ${{ steps.documentation.outputs.points || 0 }}))
-          
-          # Calculate letter grade
-          if [ $TOTAL -ge 90 ]; then
-            LETTER_GRADE="A"
-          elif [ $TOTAL -ge 80 ]; then
-            LETTER_GRADE="B"
-          elif [ $TOTAL -ge 70 ]; then
-            LETTER_GRADE="C"
-          elif [ $TOTAL -ge 60 ]; then
-            LETTER_GRADE="D"
-          else
-            LETTER_GRADE="F"
-          fi
-          
-          echo "total=$TOTAL" >> $GITHUB_OUTPUT
-          echo "letter=$LETTER_GRADE" >> $GITHUB_OUTPUT
-          echo "percentage=$TOTAL" >> $GITHUB_OUTPUT
-          
-          echo "📊 Final Score: $TOTAL/100 ($LETTER_GRADE)"
-      
-      # ==================== POST RESULTS ====================
-      
+          GRADE_SCRIPT="${{ steps.lab-info.outputs.validator_dir }}/grade.sh"
+          WORK_DIR="${{ steps.lab-info.outputs.work_dir }}"
+
+          chmod +x "$GRADE_SCRIPT"
+
+          echo "🎓 Running grading script..."
+
+          # Run grading script and capture JSON output
+          # Uses policy-results.json (from conftest or checkov fallback)
+          GRADE_JSON=$("$GRADE_SCRIPT" "$WORK_DIR" /tmp/plan.json /tmp/infracost.json /tmp/policy-results.json)
+
+          # Save JSON for later steps
+          echo "$GRADE_JSON" > /tmp/grading-results.json
+
+          # Extract key values for GitHub outputs
+          TOTAL_EARNED=$(echo "$GRADE_JSON" | jq -r '.total.earned')
+          TOTAL_MAX=$(echo "$GRADE_JSON" | jq -r '.total.max')
+          LETTER=$(echo "$GRADE_JSON" | jq -r '.letter_grade')
+
+          echo "total_earned=$TOTAL_EARNED" >> $GITHUB_OUTPUT
+          echo "total_max=$TOTAL_MAX" >> $GITHUB_OUTPUT
+          echo "letter_grade=$LETTER" >> $GITHUB_OUTPUT
+
+          # Extract category scores
+          echo "code_quality=$(echo "$GRADE_JSON" | jq -r '.scores.code_quality.earned')" >> $GITHUB_OUTPUT
+          echo "functionality=$(echo "$GRADE_JSON" | jq -r '.scores.functionality.earned')" >> $GITHUB_OUTPUT
+          echo "cost_mgmt=$(echo "$GRADE_JSON" | jq -r '.scores.cost_management.earned')" >> $GITHUB_OUTPUT
+          echo "security=$(echo "$GRADE_JSON" | jq -r '.scores.security.earned')" >> $GITHUB_OUTPUT
+          echo "documentation=$(echo "$GRADE_JSON" | jq -r '.scores.documentation.earned')" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "📊 Grade Summary: $TOTAL_EARNED/$TOTAL_MAX ($LETTER)"
+
       - name: Generate grade report
         id: report
         if: always()
         run: |
-          MONTHLY_COST=$(jq -r '.totalMonthlyCost // "N/A"' /tmp/infracost.json 2>/dev/null || echo "N/A")
-          CHECKOV_FAILED=$(jq '.summary.failed // 0' /tmp/checkov.json 2>/dev/null || echo "N/A")
+          GRADE_JSON=$(cat /tmp/grading-results.json)
           CURRENT_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-          # Calculate subtotals
-          CODE_QUALITY_TOTAL=$(( ${{ steps.fmt.outputs.points || 0 }} + ${{ steps.validate.outputs.points || 0 }} + ${{ steps.credentials.outputs.points || 0 }} + ${{ steps.naming.outputs.points || 0 }} + ${{ steps.version-check.outputs.points || 0 }} ))
-          FUNCTIONALITY_TOTAL=$(( ${{ steps.lab-validation.outputs.points || 0 }} + ${{ steps.outputs.outputs.points || 0 }} + ${{ steps.resource-check.outputs.points || 0 }} ))
-          COST_MGMT_TOTAL=$(( ${{ steps.infracost.outputs.points || 0 }} + ${{ steps.cost-check.outputs.points || 0 }} + ${{ steps.teardown-check.outputs.points || 0 }} ))
-          
+
+          # Extract values from JSON
+          LAB_NAME=$(echo "$GRADE_JSON" | jq -r '.lab.name')
+          TOTAL_EARNED=$(echo "$GRADE_JSON" | jq -r '.total.earned')
+          TOTAL_MAX=$(echo "$GRADE_JSON" | jq -r '.total.max')
+          LETTER=$(echo "$GRADE_JSON" | jq -r '.letter_grade')
+
+          # Category scores
+          CQ_EARNED=$(echo "$GRADE_JSON" | jq -r '.scores.code_quality.earned')
+          CQ_MAX=$(echo "$GRADE_JSON" | jq -r '.scores.code_quality.max')
+          FUNC_EARNED=$(echo "$GRADE_JSON" | jq -r '.scores.functionality.earned')
+          FUNC_MAX=$(echo "$GRADE_JSON" | jq -r '.scores.functionality.max')
+          COST_EARNED=$(echo "$GRADE_JSON" | jq -r '.scores.cost_management.earned')
+          COST_MAX=$(echo "$GRADE_JSON" | jq -r '.scores.cost_management.max')
+          SEC_EARNED=$(echo "$GRADE_JSON" | jq -r '.scores.security.earned')
+          SEC_MAX=$(echo "$GRADE_JSON" | jq -r '.scores.security.max')
+          DOC_EARNED=$(echo "$GRADE_JSON" | jq -r '.scores.documentation.earned')
+          DOC_MAX=$(echo "$GRADE_JSON" | jq -r '.scores.documentation.max')
+
+          # Generate check details for each category
+          generate_checks() {
+            local category=$1
+            echo "$GRADE_JSON" | jq -r --arg cat "$category" '
+              .checks[$cat][]? |
+              "- **\(.name)** (\(.points)/\(.max_points)): " +
+              (if .status == "pass" then "✅ " elif .status == "partial" then "⚠️ " else "❌ " end) +
+              .message
+            '
+          }
+
+          # Get errors and warnings
+          ERRORS=$(echo "$GRADE_JSON" | jq -r '.errors[]? // empty' | sed 's/^/- ❌ /')
+          WARNINGS=$(echo "$GRADE_JSON" | jq -r '.warnings[]? // empty' | sed 's/^/- ⚠️ /')
+
+          # Determine grade emoji
+          if [ "$TOTAL_EARNED" -ge 90 ]; then
+            GRADE_EMOJI="🎉"
+            GRADE_MSG="Excellent work! Your code meets all requirements."
+          elif [ "$TOTAL_EARNED" -ge 80 ]; then
+            GRADE_EMOJI="✅"
+            GRADE_MSG="Good job! Review the feedback below to improve your score."
+          elif [ "$TOTAL_EARNED" -ge 70 ]; then
+            GRADE_EMOJI="📝"
+            GRADE_MSG="Satisfactory. Address the issues noted below."
+          else
+            GRADE_EMOJI="⚠️"
+            GRADE_MSG="Needs Improvement. Please fix the issues above and update your PR."
+          fi
+
           cat > /tmp/report.md <<EOFMARKER
           # 🎓 Lab Grading Report
-          
-          **Student:** @${{ github.event.pull_request.user.login }}  
-          **Lab:** Week ${{ steps.lab-info.outputs.week }}, Lab ${{ steps.lab-info.outputs.lab }}  
-          **Submitted:** ${{ github.event.pull_request.created_at }}  
+
+          **Student:** @${{ github.event.pull_request.user.login }}
+          **Lab:** Week ${{ steps.lab-info.outputs.week }}, Lab ${{ steps.lab-info.outputs.lab }} - ${LAB_NAME}
+          **Submitted:** ${{ github.event.pull_request.created_at }}
           **Graded:** ${CURRENT_DATE}
-          
+
           ---
-          
-          ## 📊 Final Grade: ${{ steps.calculate-grade.outputs.total }}/100 (${{ steps.calculate-grade.outputs.letter }})
-          
+
+          ## 📊 Final Grade: ${TOTAL_EARNED}/${TOTAL_MAX} (${LETTER})
+
+          ${GRADE_EMOJI} **${GRADE_MSG}**
+
           ---
-          
+
           ## 📋 Detailed Breakdown
-          
-          ### Code Quality (25 points)
-          - **Terraform Formatting** (${{ steps.fmt.outputs.points || 0 }}/5): ${{ steps.fmt.outputs.status == 'pass' && '✅ Passed' || '❌ Failed - Run `terraform fmt`' }}
-          - **Terraform Validation** (${{ steps.validate.outputs.points || 0 }}/5): ${{ steps.validate.outputs.status == 'pass' && '✅ Passed' || '❌ Failed' }}
-          - **No Hardcoded Credentials** (${{ steps.credentials.outputs.points || 0 }}/5): ${{ steps.credentials.outputs.status == 'pass' && '✅ Passed' || '❌ Found credentials in code' }}
-          - **Naming Conventions** (${{ steps.naming.outputs.points || 0 }}/5): ${{ steps.naming.outputs.status == 'pass' && '✅ Passed' || steps.naming.outputs.status == 'partial' && '⚠️ Partial' || '❌ Failed' }}
-          - **Terraform Version Requirement** (${{ steps.version-check.outputs.points || 0 }}/5): ${{ steps.version-check.outputs.status == 'pass' && '✅ Passed' || '❌ Missing version requirement' }}
-          
-          **Subtotal:** ${CODE_QUALITY_TOTAL}/25
-          
-          ### Functionality (30 points)
-          - **Lab-Specific Requirements** (${{ steps.lab-validation.outputs.points || 0 }}/20): ${{ steps.lab-validation.outputs.status == 'pass' && '✅ Passed' || steps.lab-validation.outputs.status == 'skip' && '⚠️ No validator found' || '❌ Failed' }}
-          - **Outputs Defined** (${{ steps.outputs.outputs.points || 0 }}/5): ${{ steps.outputs.outputs.status == 'pass' && '✅ Passed' || '❌ Missing or empty outputs.tf' }}
-          - **Resources in Plan** (${{ steps.resource-check.outputs.points || 0 }}/5): ${{ steps.resource-check.outputs.status == 'pass' && '✅ Passed' || '❌ No resources to create' }}
-          
-          **Subtotal:** ${FUNCTIONALITY_TOTAL}/30
-          
-          ### Cost Management (20 points)
-          - **Infracost Analysis** (${{ steps.infracost.outputs.points || 0 }}/5): ${{ steps.infracost.outputs.status == 'pass' && '✅ Passed' || '❌ Failed' }}
-          - **Within Budget** (${{ steps.cost-check.outputs.points || 0 }}/10): ${{ steps.cost-check.outputs.status == 'pass' && '✅ Passed' || '❌ Exceeds budget' }}
-            - Estimated Cost: \$${MONTHLY_COST}/month
-          - **AutoTeardown Tag** (${{ steps.teardown-check.outputs.points || 0 }}/5): ${{ steps.teardown-check.outputs.status == 'pass' && '✅ Passed' || '❌ Missing AutoTeardown tag' }}
-          
-          **Subtotal:** ${COST_MGMT_TOTAL}/20
-          
-          ### Security (15 points)
-          - **Checkov Security Scan** (${{ steps.checkov.outputs.points || 0 }}/15): ${{ steps.checkov.outputs.points == 15 && '✅ No issues found' || steps.checkov.outputs.points >= 10 && '⚠️ Minor issues (≤3 failed checks)' || steps.checkov.outputs.points >= 5 && '⚠️ Several issues (≤5 failed checks)' || '❌ Many security issues' }}
-            - Failed Checks: ${CHECKOV_FAILED}
-          
-          **Subtotal:** ${{ steps.checkov.outputs.points || 0 }}/15
-          
-          ### Documentation (10 points)
-          - **Code Comments & README** (${{ steps.documentation.outputs.points || 0 }}/10): ${{ steps.documentation.outputs.points == 10 && '✅ Excellent' || steps.documentation.outputs.points >= 5 && '⚠️ Adequate' || '❌ Needs improvement' }}
-          
-          **Subtotal:** ${{ steps.documentation.outputs.points || 0 }}/10
-          
+
+          ### Code Quality (${CQ_EARNED}/${CQ_MAX} points)
+          $(generate_checks "code_quality")
+
+          ### Functionality (${FUNC_EARNED}/${FUNC_MAX} points)
+          $(generate_checks "functionality")
+
+          ### Cost Management (${COST_EARNED}/${COST_MAX} points)
+          $(generate_checks "cost_management")
+
+          ### Security (${SEC_EARNED}/${SEC_MAX} points)
+          $(generate_checks "security")
+
+          ### Documentation (${DOC_EARNED}/${DOC_MAX} points)
+          $(generate_checks "documentation")
+
           ---
-          
+
+          $(if [ -n "$ERRORS" ]; then echo "## ❌ Errors"; echo "$ERRORS"; echo ""; fi)
+          $(if [ -n "$WARNINGS" ]; then echo "## ⚠️ Warnings"; echo "$WARNINGS"; echo ""; fi)
+
           ## 📝 Next Steps
-          
-          ${{ steps.calculate-grade.outputs.total >= 90 && '🎉 **Excellent work!** Your code meets all requirements.' || steps.calculate-grade.outputs.total >= 70 && '✅ **Good job!** Review the feedback above to improve your score.' || '⚠️ **Needs Improvement** - Please address the issues above and update your PR.' }}
-          
-          ${{ steps.calculate-grade.outputs.total < 70 && '
+
+          $(if [ "$TOTAL_EARNED" -lt 70 ]; then cat <<NEXT
           ### To Improve Your Grade:
           1. Fix any failed checks listed above
           2. Push your changes to this PR
           3. The grading workflow will run automatically
-          ' || '' }}
-          
+          NEXT
+          fi)
+
           ---
-          
+
           ## 🔗 Artifacts
           - View the full workflow run: [Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - Infracost report: Available in workflow artifacts
-          - Security scan: Available in workflow artifacts
-          
+          - Detailed results available in workflow artifacts
+
           ---
-          
+
           <sub>🤖 Automated grading powered by GitHub Actions | Questions? Tag @${{ github.repository_owner }} in a comment</sub>
           EOFMARKER
-          
+
           echo "✅ Report generated"
-      
+
       - name: Post grade as PR comment
         if: always()
         uses: actions/github-script@v7
@@ -584,21 +336,19 @@ jobs:
           script: |
             const fs = require('fs');
             const report = fs.readFileSync('/tmp/report.md', 'utf8');
-            
-            // Check if we already posted a comment
+
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number
             });
-            
-            const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && 
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
               comment.body.includes('Lab Grading Report')
             );
-            
+
             if (botComment) {
-              // Update existing comment
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -607,7 +357,6 @@ jobs:
               });
               console.log('✅ Updated existing grade comment');
             } else {
-              // Create new comment
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -616,7 +365,7 @@ jobs:
               });
               console.log('✅ Posted new grade comment');
             }
-      
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -626,17 +375,20 @@ jobs:
             /tmp/plan.json
             /tmp/plan.txt
             /tmp/infracost.json
-            /tmp/checkov.json
-            /tmp/grading.json
+            /tmp/conftest.json
+            /tmp/policy-results.json
+            /tmp/grading-results.json
           retention-days: 30
-      
+
       - name: Set job status
         if: always()
         run: |
-          if [ ${{ steps.calculate-grade.outputs.total }} -ge 70 ]; then
-            echo "✅ Grade: ${{ steps.calculate-grade.outputs.total }}/100 - PASSING"
+          TOTAL=${{ steps.grade.outputs.total_earned || 0 }}
+
+          if [ "$TOTAL" -ge 70 ]; then
+            echo "✅ Grade: $TOTAL/100 - PASSING"
             exit 0
           else
-            echo "⚠️ Grade: ${{ steps.calculate-grade.outputs.total }}/100 - NEEDS IMPROVEMENT"
+            echo "⚠️ Grade: $TOTAL/100 - NEEDS IMPROVEMENT"
             exit 0
           fi

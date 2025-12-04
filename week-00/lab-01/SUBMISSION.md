@@ -1,4 +1,4 @@
-# Lab 1 Submission Checklist
+# Lab 1 Submission Checklist - WordPress on EC2
 
 ## Required Deliverables
 
@@ -10,6 +10,7 @@ Your `student-work/` directory must contain:
 - [ ] `variables.tf` with student_name, instance_type, and my_ip variables
 - [ ] `outputs.tf` with all required outputs
 - [ ] `backend.tf` with S3 remote state configuration
+- [ ] `user_data.sh` with WordPress installation script
 - [ ] `.gitignore` that prevents committing state files and tfvars
 - [ ] All code passes `terraform fmt -check`
 - [ ] All code passes `terraform validate`
@@ -19,19 +20,22 @@ Your `student-work/` directory must contain:
 #### AWS Key Pair (5 points)
 - [ ] `aws_key_pair` resource defined
 - [ ] Key name includes student identifier
+- [ ] References local public key file
 - [ ] All required tags present
 
-#### Security Group (10 points)
+#### Security Group (15 points)
 - [ ] `aws_security_group` resource defined
-- [ ] Ingress rule allowing SSH (port 22) from specific IP (not 0.0.0.0/0)
-- [ ] Egress rule allowing all outbound traffic
-- [ ] Description field populated
+- [ ] **Ingress rule: SSH (port 22)** from specific IP (not 0.0.0.0/0)
+- [ ] **Ingress rule: HTTP (port 80)** from 0.0.0.0/0
+- [ ] **Ingress rule: HTTPS (port 443)** from 0.0.0.0/0
+- [ ] **Egress rule: Allow all outbound** (CRITICAL - Terraform doesn't add this by default!)
+- [ ] Description fields populated
 - [ ] All required tags present
 
 #### EC2 Instance (20 points)
 - [ ] `aws_instance` resource defined
 - [ ] Uses data source for AMI (not hardcoded AMI ID)
-- [ ] Instance type is t3.micro or smaller
+- [ ] Instance type is t3.micro or t2.micro
 - [ ] References key_pair resource
 - [ ] References security_group resource
 - [ ] **IMDSv2 Configuration:**
@@ -39,12 +43,14 @@ Your `student-work/` directory must contain:
   - [ ] `http_tokens = "required"` (enforces IMDSv2)
   - [ ] `http_put_response_hop_limit = 1`
   - [ ] `instance_metadata_tags = "enabled"`
-- [ ] User data script defined (optional but recommended)
+- [ ] User data script referenced
+- [ ] Root block device configured (20 GB, encrypted)
 - [ ] All required tags present
 
 #### Data Source (5 points)
 - [ ] `data "aws_ami"` block for Amazon Linux 2023
-- [ ] Filters for latest AMI
+- [ ] Filters for latest AMI (`most_recent = true`)
+- [ ] Filters for correct architecture (x86_64)
 - [ ] Referenced in instance configuration
 
 ### 3. Required Tags
@@ -57,23 +63,23 @@ All resources must include these tags:
 - [ ] `Student` - Your GitHub username
 - [ ] `AutoTeardown` - Set to "8h"
 
-### 4. Outputs
+### 4. Required Outputs
 
-Required outputs in `outputs.tf`:
+Your `outputs.tf` must include:
 
 - [ ] `instance_id` - EC2 instance ID
-- [ ] `instance_public_ip` - Public IP address
-- [ ] `instance_public_dns` - Public DNS name
-- [ ] `ssh_connection_command` - Full SSH command
+- [ ] `public_ip` - Public IP address
+- [ ] `public_dns` - Public DNS name
+- [ ] `wordpress_url` - Full HTTP URL to access WordPress
+- [ ] `ssh_command` - Complete SSH command with key path
 - [ ] `ami_id` - AMI ID used
-- [ ] `key_pair_name` - Key pair name
 - [ ] `security_group_id` - Security group ID
 
 ### 5. Backend Configuration
 
 - [ ] Backend configured for S3
 - [ ] State path is `week-00/lab-01/terraform.tfstate`
-- [ ] Encryption enabled
+- [ ] Encryption enabled (`encrypt = true`)
 - [ ] `use_lockfile = true` for S3 native locking
 - [ ] No state files (terraform.tfstate) committed to Git
 
@@ -83,16 +89,26 @@ Required outputs in `outputs.tf`:
 - [ ] No terraform.tfvars committed to Git
 - [ ] SSH access restricted to specific IP (not 0.0.0.0/0)
 - [ ] IMDSv2 is **required** (not optional)
-- [ ] Private keys never committed to Git
+- [ ] Private SSH keys never committed to Git
+- [ ] EBS volume encryption enabled
 
-### 7. Cost Management
+### 7. User Data Script Requirements
 
-- [ ] Instance type is free-tier eligible (t3.micro recommended)
+- [ ] `user_data.sh` file exists
+- [ ] Installs Apache (httpd), PHP, MariaDB
+- [ ] Creates WordPress database and user
+- [ ] Downloads and configures WordPress
+- [ ] Sets proper file permissions
+- [ ] Logs output for debugging
+
+### 8. Cost Management
+
+- [ ] Instance type is cost-effective (t3.micro or t2.micro)
 - [ ] Infracost report generated
-- [ ] Estimated monthly cost under $10
+- [ ] Estimated monthly cost under $15
 - [ ] AutoTeardown tag present on all resources
 
-### 8. Testing & Verification
+### 9. Testing & Verification
 
 Before submitting, verify:
 
@@ -101,56 +117,66 @@ Before submitting, verify:
 - [ ] `terraform fmt -check` passes (no formatting needed)
 - [ ] `terraform plan` shows expected resources
 - [ ] `terraform apply` succeeds
-- [ ] Can SSH into instance using generated key
+- [ ] Can SSH into instance using your key
 - [ ] IMDSv1 requests fail (curl without token)
 - [ ] IMDSv2 requests succeed (curl with token)
-- [ ] User data script executed successfully
+- [ ] WordPress accessible via browser at public IP
+- [ ] WordPress installation wizard appears
 - [ ] All outputs display correctly
 - [ ] Infracost analysis runs successfully
 
-### 9. Documentation (Optional but Recommended)
-
-- [ ] README.md in student-work directory
-- [ ] Comments explaining complex configurations
-- [ ] Notes about any challenges or learnings
+---
 
 ## Grading Rubric (100 points)
 
 ### Code Quality (25 points)
-- Terraform formatting (5 pts)
-- Terraform validation (5 pts)
-- No hardcoded credentials (5 pts)
-- Naming conventions and tags (5 pts)
-- Terraform version requirement (5 pts)
+| Check | Points |
+|-------|--------|
+| Terraform formatting passes | 5 |
+| Terraform validation passes | 5 |
+| No hardcoded credentials | 5 |
+| Proper naming conventions | 5 |
+| Uses data source for AMI (not hardcoded) | 5 |
 
 ### Functionality (30 points)
-- Key pair resource exists and configured correctly (5 pts)
-- Security group with proper SSH rules (5 pts)
-- EC2 instance resource properly configured (10 pts)
-- Data source for AMI (5 pts)
-- All outputs defined and working (5 pts)
+| Check | Points |
+|-------|--------|
+| Key pair resource exists and configured | 5 |
+| Security group with SSH rule (restricted) | 5 |
+| Security group with HTTP/HTTPS rules | 5 |
+| **Security group with egress rule** | 5 |
+| EC2 instance properly configured | 5 |
+| All required outputs defined | 5 |
 
 ### IMDSv2 Configuration (15 points)
-- `http_tokens = "required"` (5 pts)
-- `http_endpoint = "enabled"` (3 pts)
-- `http_put_response_hop_limit = 1` (3 pts)
-- `instance_metadata_tags = "enabled"` (2 pts)
-- Configuration can be verified in plan JSON (2 pts)
+| Check | Points |
+|-------|--------|
+| `http_tokens = "required"` | 5 |
+| `http_endpoint = "enabled"` | 3 |
+| `http_put_response_hop_limit = 1` | 4 |
+| `instance_metadata_tags = "enabled"` | 3 |
 
 ### Cost Management (15 points)
-- Infracost analysis completed (3 pts)
-- Instance type is free-tier eligible (5 pts)
-- Monthly cost under budget (5 pts)
-- AutoTeardown tag present (2 pts)
+| Check | Points |
+|-------|--------|
+| Infracost analysis completed | 5 |
+| Instance type is cost-effective | 5 |
+| AutoTeardown tag present | 5 |
 
 ### Security (10 points)
-- SSH restricted to specific IP (not 0.0.0.0/0) (5 pts)
-- No secrets in code (3 pts)
-- Checkov security scan results (2 pts)
+| Check | Points |
+|-------|--------|
+| SSH restricted to specific IP | 5 |
+| EBS volume encrypted | 3 |
+| Checkov security scan passes | 2 |
 
 ### Documentation (5 points)
-- Code comments (3 pts)
-- Optional README (2 pts)
+| Check | Points |
+|-------|--------|
+| Code comments explaining key sections | 3 |
+| Variables have descriptions | 2 |
+
+---
 
 ## Submission Instructions
 
@@ -178,10 +204,10 @@ git status  # Verify no .tfstate or .tfvars files
 #   variables.tf
 #   outputs.tf
 #   backend.tf
+#   user_data.sh
 #   .gitignore
-#   README.md (optional)
 
-git commit -m "Week 0 Lab 1 - EC2 with IMDSv2 - [Your Name]"
+git commit -m "Week 0 Lab 1 - WordPress on EC2 - [Your Name]"
 git push origin week-00-lab-01
 ```
 
@@ -196,16 +222,18 @@ gh pr create --repo YOUR-USERNAME/labs_terraform_course \
   --head week-00-lab-01 \
   --title "Week 0 Lab 1 - [Your Name]" \
   --body "$(cat <<'EOF'
-## Lab 1 Submission - EC2 with IMDSv2
+## Lab 1 Submission - WordPress on EC2
 
 ### Completed Tasks
 - [x] Created SSH key pair resource
-- [x] Configured security group with restricted SSH access
+- [x] Configured security group with SSH, HTTP, HTTPS, and egress rules
 - [x] Deployed EC2 instance with Amazon Linux 2023
 - [x] Configured IMDSv2 (required mode)
+- [x] Created user data script for WordPress installation
 - [x] Set up remote state in S3
 - [x] Tested SSH connectivity
-- [x] Verified IMDSv2 functionality
+- [x] Verified WordPress loads in browser
+- [x] Tested IMDSv2 functionality
 
 ### Resources Created
 - 1 EC2 instance (t3.micro)
@@ -216,12 +244,13 @@ gh pr create --repo YOUR-USERNAME/labs_terraform_course \
 - [x] SSH connection successful
 - [x] IMDSv1 requests blocked (as expected)
 - [x] IMDSv2 requests working
-- [x] User data executed successfully
+- [x] WordPress accessible at public IP
+- [x] User data script executed successfully
 
 ### Cost Analysis
 **Estimated Monthly Cost:** $[X.XX from Infracost]
 - EC2 instance (t3.micro): ~$7.59/month
-- Within budget: Yes
+- EBS storage (20 GB): ~$2.00/month
 
 ### Questions/Notes
 [Add any questions or notes about the lab]
@@ -229,21 +258,14 @@ EOF
 )"
 ```
 
-**Or via GitHub Web UI:**
-1. Go to your fork: `https://github.com/YOUR-USERNAME/labs_terraform_course`
-2. Click "Pull requests" → "New pull request"
-3. Set base: `YOUR-USERNAME/labs_terraform_course:main`
-4. Set compare: `YOUR-USERNAME/labs_terraform_course:week-00-lab-01`
-5. Fill out the template above
-6. Click "Create pull request"
-
 ### 4. Wait for Automated Grading
 
 The grading workflow will automatically:
 - ✅ Check code formatting and validation
+- ✅ Verify security group has egress rule
 - ✅ Verify IMDSv2 configuration
-- ✅ Check security group rules
-- ✅ Validate key pair resource
+- ✅ Check for data source usage (not hardcoded AMI)
+- ✅ Validate all required outputs
 - ✅ Run cost analysis (Infracost)
 - ✅ Perform security scanning (Checkov)
 - ✅ Calculate grade (0-100 points)
@@ -251,77 +273,60 @@ The grading workflow will automatically:
 
 **Expected grading time:** 3-5 minutes
 
-### 5. Review Feedback and Iterate
-
-1. Check the automated comment on your PR for detailed feedback
-2. If improvements are needed:
-   - Make changes to your code
-   - Commit and push to the same branch
-   - Workflow will automatically re-run
-3. Once satisfied with your grade, tag instructor: `@shart-cloud`
+---
 
 ## Common Issues and Solutions
 
-### Issue: "InvalidKeyPair.Duplicate"
-**Solution:** Key pair name already exists
-```bash
-# Delete existing key pair
-aws ec2 delete-key-pair --key-name terraform-lab-01-yourname
+### Issue: "Security group egress rule missing"
+**Solution:** Add the egress rule to your security group:
+```hcl
+egress {
+  from_port   = 0
+  to_port     = 0
+  protocol    = "-1"
+  cidr_blocks = ["0.0.0.0/0"]
+}
+```
 
-# Or use a different name in main.tf
+### Issue: WordPress not loading
+**Possible causes:**
+1. Missing egress rule (instance can't download packages)
+2. User data script still running (wait 2-3 minutes)
+3. HTTP port 80 not open in security group
+
+**Debug:**
+```bash
+ssh -i ~/.ssh/wordpress-lab ec2-user@$(terraform output -raw public_ip)
+sudo cat /var/log/user-data.log
 ```
 
 ### Issue: SSH Connection Refused
 **Solutions:**
-- Wait 1-2 minutes for instance to fully boot
-- Verify security group allows your current IP
-- Check instance is running: `terraform output instance_id`
+- Wait 1-2 minutes for instance boot
+- Verify your IP: `curl -s https://checkip.amazonaws.com`
+- Check security group allows your IP on port 22
+- Verify key permissions: `chmod 600 ~/.ssh/wordpress-lab`
 
 ### Issue: "Permission denied (publickey)"
 **Solutions:**
 ```bash
-# Fix private key permissions
-chmod 600 ~/.ssh/terraform-lab-01
-
-# Verify you're using the correct key path
-ls -la ~/.ssh/terraform-lab-01
+chmod 600 ~/.ssh/wordpress-lab
+ls -la ~/.ssh/wordpress-lab
 ```
 
-### Issue: IMDSv1 Working (Should Not Be)
-**Problem:** IMDSv2 not properly configured
-**Solution:** Verify in main.tf:
-```hcl
-metadata_options {
-  http_tokens = "required"  # Must be "required" not "optional"
-}
-```
-
-### Issue: Security Group Allows 0.0.0.0/0
-**Problem:** SSH open to the world (security risk)
-**Solution:** Use specific IP in terraform.tfvars:
-```hcl
-my_ip = "YOUR.IP.ADDRESS/32"
-```
+### Issue: IMDSv1 Working (Should Fail)
+**Solution:** Verify `http_tokens = "required"` in metadata_options block
 
 ### Issue: State File in Git
-**Problem:** terraform.tfstate being committed
 **Solution:**
 ```bash
-# Remove from git
 git rm --cached terraform.tfstate terraform.tfstate.backup
-
-# Verify .gitignore includes:
-# *.tfstate
-# *.tfstate.*
+# Ensure .gitignore includes *.tfstate*
 ```
 
-### Issue: Infracost Fails
-**Solutions:**
-- Verify Infracost API key: `infracost configure get api_key`
-- Check internet connectivity
-- Ensure terraform init has been run
+---
 
-## Validation Script Details
+## Validation Script Checks
 
 The automated validator checks:
 
@@ -329,26 +334,28 @@ The automated validator checks:
 - Resource type: `aws_key_pair`
 - Has `key_name` attribute
 - Has `public_key` attribute
-- All required tags present
+- Required tags present
 
-### 2. Security Group (10 points)
+### 2. Security Group (15 points)
 - Resource type: `aws_security_group`
-- Has ingress rule for port 22
-- Ingress NOT from 0.0.0.0/0 (must be restricted)
-- Has egress rules
-- All required tags present
+- Ingress rule for port 22 (SSH) - NOT from 0.0.0.0/0
+- Ingress rule for port 80 (HTTP)
+- Ingress rule for port 443 (HTTPS)
+- **Egress rule exists** (CRITICAL)
+- Required tags present
 
 ### 3. EC2 Instance (20 points)
 - Resource type: `aws_instance`
-- Uses data source for AMI (not hardcoded)
-- Instance type is t3.micro or smaller
+- Uses data source for AMI
+- Instance type is t3.micro or t2.micro
 - References key_pair via `key_name`
 - References security_group via `vpc_security_group_ids`
-- All required tags present
+- User data is not empty
+- Required tags present
 
 ### 4. IMDSv2 Configuration (15 points)
 - `metadata_options` block exists
-- `http_tokens = "required"` (not "optional")
+- `http_tokens = "required"`
 - `http_endpoint = "enabled"`
 - `http_put_response_hop_limit = 1`
 - `instance_metadata_tags = "enabled"`
@@ -360,7 +367,9 @@ The automated validator checks:
 
 ### 6. Outputs (5 points)
 - At least 5 outputs defined
-- Includes instance_id, public_ip, and ssh_connection_command
+- Includes instance_id, public_ip, wordpress_url, and ssh_command
+
+---
 
 ## Required Files Summary
 
@@ -371,8 +380,8 @@ week-00/lab-01/student-work/
 ├── main.tf                 # Resources (key pair, security group, EC2)
 ├── variables.tf            # Input variables
 ├── outputs.tf              # Outputs for instance info
-├── terraform.tfvars        # Variable values (NOT committed to Git)
-└── README.md               # Optional documentation
+├── user_data.sh            # WordPress installation script
+└── terraform.tfvars        # Variable values (NOT committed to Git)
 ```
 
 **NOT included in Git:**
@@ -381,6 +390,8 @@ week-00/lab-01/student-work/
 - `.terraform/` directory
 - `terraform.tfvars`
 - `*.tfplan`
+
+---
 
 ## After Submission
 
@@ -398,35 +409,17 @@ terraform destroy
 ### Verify Cleanup
 
 ```bash
-# Check no instances remain
 aws ec2 describe-instances \
   --filters "Name=tag:Student,Values=YOUR-USERNAME" \
-  --query 'Reservations[*].Instances[*].[InstanceId,State.Name]'
-
-# Check security groups (may need manual cleanup if not tagged)
-aws ec2 describe-security-groups \
-  --filters "Name=tag:Student,Values=YOUR-USERNAME"
-
-# Check key pairs
-aws ec2 describe-key-pairs \
-  --filters "Name=tag:Student,Values=YOUR-USERNAME"
+  --query 'Reservations[*].Instances[*].[InstanceId,State.Name]' \
+  --output table
 ```
+
+---
 
 ## Questions?
 
 - Review the [lab README](README.md) troubleshooting section
 - Check workflow logs in the Actions tab
 - Post in course discussion forum
-- Tag instructor in PR: `@shart-cloud`
-
-## Grade Appeal
-
-If you believe your grade is incorrect:
-1. Review the detailed feedback in the PR comment
-2. Check the workflow logs for errors
-3. Verify all requirements in this checklist
-4. Tag instructor with specific questions: `@shart-cloud`
-
----
-
-**Good luck!** This lab builds essential skills for managing cloud infrastructure securely.
+- Tag instructor in PR: `@jlgore`

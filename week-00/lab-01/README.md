@@ -1,8 +1,8 @@
-# Lab 1: EC2 Instances, Key Pairs, and Instance Metadata Service (IMDS)
+# Lab 1: WordPress on EC2 - EC2 Fundamentals
 
 ## Objective
 
-Learn to deploy and secure EC2 instances using Terraform, including SSH key pair management, security group configuration, and proper Instance Metadata Service (IMDSv2) configuration for enhanced security.
+Deploy a fully functional WordPress site on a single EC2 instance with local MariaDB. This lab teaches EC2 fundamentals including security groups, user data scripts, SSH key management, and the Instance Metadata Service (IMDS).
 
 ## Estimated Time
 
@@ -11,7 +11,7 @@ Learn to deploy and secure EC2 instances using Terraform, including SSH key pair
 ## Prerequisites
 
 - Completed Lab 0 (Terraform basics, S3, remote state)
-- AWS account with proper credentials configured
+- Personal AWS account with proper credentials configured
 - Terraform 1.9.0+ installed
 - AWS CLI configured
 - SSH client installed on your system
@@ -20,13 +20,40 @@ Learn to deploy and secure EC2 instances using Terraform, including SSH key pair
 ## Learning Outcomes
 
 By completing this lab, you will:
-- Create and manage SSH key pairs for EC2 access
-- Deploy EC2 instances with proper security configurations
-- Configure security groups to control network traffic
-- Implement IMDSv2 for enhanced instance security
-- Use Terraform data sources to query AWS resources
-- Understand EC2 instance lifecycle management
-- Connect to instances securely via SSH
+- Create and configure EC2 instances with Terraform
+- Write and use user data scripts for application bootstrapping
+- Configure security groups with appropriate ingress/egress rules
+- Understand why Terraform requires explicit egress rules (unlike the AWS Console)
+- Generate and use SSH key pairs for secure instance access
+- Deploy a working WordPress site accessible via browser
+- Use the Instance Metadata Service v2 (IMDSv2) to query instance information
+- Troubleshoot common EC2 and application deployment issues
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│              Default VPC                    │
+│  ┌───────────────────────────────────────┐  │
+│  │         Public Subnet                 │  │
+│  │  ┌─────────────────────────────────┐  │  │
+│  │  │       EC2 (t3.micro)            │  │  │
+│  │  │  ┌───────────────────────────┐  │  │  │
+│  │  │  │   Amazon Linux 2023       │  │  │  │
+│  │  │  │   Apache + PHP            │  │  │  │
+│  │  │  │   MariaDB (localhost)     │  │  │  │
+│  │  │  │   WordPress               │  │  │  │
+│  │  │  └───────────────────────────┘  │  │  │
+│  │  └─────────────────────────────────┘  │  │
+│  │              │                        │  │
+│  │     Security Group                    │  │
+│  │     - SSH (22) from your IP           │  │
+│  │     - HTTP (80) from anywhere         │  │
+│  │     - HTTPS (443) from anywhere       │  │
+│  │     - All outbound traffic            │  │
+│  └───────────────────────────────────────┘  │
+└─────────────────────────────────────────────┘
+```
 
 ## Background: Understanding EC2 Components
 
@@ -36,21 +63,24 @@ Amazon Elastic Compute Cloud (EC2) provides resizable compute capacity in the cl
 
 ### Key Components We'll Use
 
-1. **Key Pairs**: SSH public/private key pairs for secure authentication
-2. **Security Groups**: Virtual firewalls controlling inbound/outbound traffic
-3. **AMI (Amazon Machine Image)**: Template for the instance (OS + software)
-4. **Instance Type**: Defines CPU, memory, storage, and network capacity
-5. **IMDS (Instance Metadata Service)**: API providing instance information
+1. **AMI (Amazon Machine Image)**: Template containing the OS and software
+2. **Instance Type**: Defines CPU, memory, storage, and network capacity
+3. **Key Pairs**: SSH public/private keys for secure authentication
+4. **Security Groups**: Virtual firewalls controlling inbound/outbound traffic
+5. **User Data**: Scripts that run when the instance first boots
+6. **IMDS (Instance Metadata Service)**: API providing instance information
 
 ### Why IMDSv2 Matters
 
-Instance Metadata Service provides information about your EC2 instance (instance ID, IAM credentials, etc.). IMDSv2 adds security by requiring session-based authentication, preventing certain types of attacks (like SSRF - Server-Side Request Forgery).
+The Instance Metadata Service provides information about your EC2 instance (instance ID, public IP, IAM credentials, etc.). IMDSv2 adds security by requiring session-based authentication, preventing certain types of attacks like SSRF (Server-Side Request Forgery).
 
 **Key differences:**
-- **IMDSv1** (legacy): Simple HTTP requests, vulnerable to SSRF
-- **IMDSv2** (recommended): Requires session token, more secure
+- **IMDSv1** (legacy): Simple HTTP requests, vulnerable to SSRF attacks
+- **IMDSv2** (recommended): Requires session token, significantly more secure
 
 We'll configure instances to **require** IMDSv2.
+
+---
 
 ## Tasks
 
@@ -67,31 +97,32 @@ Create `backend.tf` for remote state storage (using the state bucket from Lab 0)
 # Backend configuration for remote state storage
 terraform {
   backend "s3" {
-    bucket       = "terraform-state-YOUR-ACCOUNT-ID"  # Replace with your state bucket
+    bucket       = "terraform-state-YOUR-ACCOUNT-ID"  # Replace with your actual account ID
     key          = "week-00/lab-01/terraform.tfstate"
     region       = "us-east-1"
     encrypt      = true
-    use_lockfile = true
+    use_lockfile = true  # Native S3 locking (Terraform 1.9+)
   }
 }
 ```
 
-**Remember:** Replace `YOUR-ACCOUNT-ID` with your AWS account ID.
-
-**Quick way to get it:**
+**Quick way to get your bucket name:**
 ```bash
-echo "terraform-state-$(aws sts get-caller-identity --query Account --output text)"
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+echo "terraform-state-$AWS_ACCOUNT_ID"
 ```
 
-### Part 2: Create Terraform Configuration Skeleton (15 minutes)
+---
 
-#### 2.1 Create `main.tf` with Terraform and Provider Blocks
+### Part 2: Create Terraform Configuration (15 minutes)
+
+#### 2.1 Create `main.tf` with Provider Configuration
 
 ```hcl
 # Terraform version and provider requirements
 terraform {
   required_version = ">= 1.9.0"
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -119,11 +150,11 @@ variable "student_name" {
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t3.micro"  # Free tier eligible
+  default     = "t3.micro"
 }
 
 variable "my_ip" {
-  description = "Your public IP address for SSH access (CIDR notation)"
+  description = "Your public IP address for SSH access (CIDR notation, e.g., 203.0.113.42/32)"
   type        = string
 }
 ```
@@ -146,9 +177,16 @@ Example: If your IP is `203.0.113.42`, use `203.0.113.42/32`
 
 **Important:** Make sure `.gitignore` includes `*.tfvars` to avoid committing your IP!
 
-### Part 3: Get the Latest Amazon Linux 2023 AMI (15 minutes)
+---
+
+### Part 3: Find the Latest Amazon Linux 2023 AMI (15 minutes)
 
 Instead of hardcoding an AMI ID, we'll use a **data source** to always get the latest Amazon Linux 2023 AMI.
+
+**Why not hardcode AMI IDs?**
+- AMI IDs are region-specific (different in us-east-1 vs us-west-2)
+- AMI IDs change when Amazon releases updates
+- Hardcoded IDs become stale and may be deprecated
 
 Add to `main.tf`:
 
@@ -157,12 +195,12 @@ Add to `main.tf`:
 data "aws_ami" "amazon_linux_2023" {
   most_recent = true
   owners      = ["amazon"]
-  
+
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023*-kernel-*-x86_64"]
   }
-  
+
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
@@ -171,10 +209,10 @@ data "aws_ami" "amazon_linux_2023" {
 ```
 
 **Understanding data sources:**
-- `data` blocks query existing resources (don't create anything)
+- `data` blocks query existing resources (they don't create anything)
 - This finds the newest AL2023 AMI matching our filters
-- We can reference it as: `data.aws_ami.amazon_linux_2023.id`
-- AMIs are region-specific, so this finds the AMI for us-east-1
+- We reference it as: `data.aws_ami.amazon_linux_2023.id`
+- The query runs during `terraform plan` and `terraform apply`
 
 **Test it:**
 ```bash
@@ -182,45 +220,55 @@ terraform init
 terraform plan
 ```
 
-### Part 4: Create an SSH Key Pair (20 minutes)
+You should see the AMI ID that will be used.
 
-EC2 instances need SSH keys for secure access. We'll create a key pair using Terraform.
+---
+
+### Part 4: Generate SSH Key Pair (20 minutes)
+
+EC2 instances use SSH keys for secure access. We'll generate a key pair locally and import the public key to AWS.
 
 #### 4.1 Generate Local SSH Key
 
-First, generate a key pair on your local machine:
-
 ```bash
 # Create SSH key with no passphrase (for learning purposes)
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/terraform-lab-01 -N ""
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/wordpress-lab -N ""
 ```
 
 This creates:
-- Private key: `~/.ssh/terraform-lab-01` (keep this secret!)
-- Public key: `~/.ssh/terraform-lab-01.pub` (safe to share)
+- Private key: `~/.ssh/wordpress-lab` (keep this secret!)
+- Public key: `~/.ssh/wordpress-lab.pub` (safe to share with AWS)
 
 **On Windows (PowerShell):**
 ```powershell
-ssh-keygen -t rsa -b 4096 -f $env:USERPROFILE\.ssh\terraform-lab-01 -N '""'
+ssh-keygen -t rsa -b 4096 -f $env:USERPROFILE\.ssh\wordpress-lab -N '""'
 ```
 
 **Verify the keys were created:**
 ```bash
-ls -l ~/.ssh/terraform-lab-01*
+ls -l ~/.ssh/wordpress-lab*
 ```
 
-#### 4.2 Import Public Key to AWS
+#### 4.2 Set Proper Permissions (Linux/macOS)
+
+SSH requires private keys to have restrictive permissions:
+
+```bash
+chmod 600 ~/.ssh/wordpress-lab
+```
+
+#### 4.3 Import Public Key to AWS
 
 Add to `main.tf`:
 
 ```hcl
 # Import SSH public key to AWS
-resource "aws_key_pair" "lab_key" {
-  key_name   = "terraform-lab-01-${var.student_name}"
-  public_key = file("~/.ssh/terraform-lab-01.pub")
-  
+resource "aws_key_pair" "wordpress" {
+  key_name   = "wordpress-${var.student_name}"
+  public_key = file("~/.ssh/wordpress-lab.pub")
+
   tags = {
-    Name         = "Lab 01 SSH Key"
+    Name         = "WordPress SSH Key - ${var.student_name}"
     Environment  = "Learning"
     ManagedBy    = "Terraform"
     Student      = var.student_name
@@ -235,31 +283,45 @@ resource "aws_key_pair" "lab_key" {
 - The private key NEVER leaves your computer
 - You'll reference this key when creating the instance
 
-**Note:** The `file()` function needs to work in GitHub Actions too. For the grading workflow, we'll handle this differently (the validator will accept any valid key pair resource).
+---
 
-### Part 5: Create a Security Group (25 minutes)
+### Part 5: Create Security Group (25 minutes)
 
-Security groups act as virtual firewalls. We'll create one that allows SSH from only your IP.
+Security groups act as virtual firewalls. This is one of the most important parts of the lab.
 
 #### 5.1 Understanding Security Group Rules
 
 - **Ingress rules**: Inbound traffic (coming TO your instance)
 - **Egress rules**: Outbound traffic (going FROM your instance)
 
-For this lab:
-- **Allow SSH (port 22)** from your IP only
-- **Allow all outbound traffic** (for updates, etc.)
+For WordPress, we need:
+- **SSH (port 22)**: For you to connect and troubleshoot
+- **HTTP (port 80)**: For visitors to access WordPress
+- **HTTPS (port 443)**: For secure connections (future use)
+- **All outbound**: So the instance can download packages
 
-#### 5.2 Create Security Group
+#### 5.2 CRITICAL: Terraform vs AWS Console Behavior
+
+> **IMPORTANT**: When you create a security group in the AWS Console, it automatically adds a default egress rule allowing all outbound traffic. **Terraform does NOT do this!**
+
+If you forget to add an egress rule in Terraform, your instance:
+- Cannot download packages (`dnf update` fails)
+- Cannot download WordPress
+- Cannot reach the internet at all
+- Will appear to "hang" during user data execution
+
+**This is one of the most common mistakes students make!**
+
+#### 5.3 Create Security Group
 
 Add to `main.tf`:
 
 ```hcl
-# Security group for EC2 instance
-resource "aws_security_group" "lab_sg" {
-  name        = "terraform-lab-01-${var.student_name}"
-  description = "Security group for Lab 01 EC2 instance"
-  
+# Security group for WordPress server
+resource "aws_security_group" "wordpress" {
+  name        = "wordpress-${var.student_name}"
+  description = "Security group for WordPress server"
+
   # SSH access from your IP only
   ingress {
     description = "SSH from my IP"
@@ -268,18 +330,38 @@ resource "aws_security_group" "lab_sg" {
     protocol    = "tcp"
     cidr_blocks = [var.my_ip]
   }
-  
-  # Allow all outbound traffic
+
+  # HTTP access from anywhere (for WordPress)
+  ingress {
+    description = "HTTP from anywhere"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # HTTPS access from anywhere (for future SSL)
+  ingress {
+    description = "HTTPS from anywhere"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # CRITICAL: Terraform does NOT add default egress rules!
+  # Without this, your instance cannot reach the internet
+  # to download packages, WordPress, or anything else.
   egress {
-    description = "Allow all outbound"
+    description = "Allow all outbound traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"  # -1 means all protocols
     cidr_blocks = ["0.0.0.0/0"]
   }
-  
+
   tags = {
-    Name         = "Lab 01 Security Group"
+    Name         = "wordpress-sg-${var.student_name}"
     Environment  = "Learning"
     ManagedBy    = "Terraform"
     Student      = var.student_name
@@ -289,28 +371,191 @@ resource "aws_security_group" "lab_sg" {
 ```
 
 **Understanding the configuration:**
-- `from_port` and `to_port`: Port range (22 is standard SSH port)
-- `protocol`: `tcp`, `udp`, `icmp`, or `-1` (all)
-- `cidr_blocks`: IP ranges allowed (your IP for SSH)
-- `0.0.0.0/0`: Allows all IP addresses (used for outbound)
+- `from_port` and `to_port`: Port range (22 for SSH, 80 for HTTP, etc.)
+- `protocol`: `tcp`, `udp`, `icmp`, or `-1` (all protocols)
+- `cidr_blocks`: IP ranges allowed
+  - Your IP with `/32` for SSH (most restrictive)
+  - `0.0.0.0/0` means "anywhere" (needed for public web access)
 
-**Security best practice:** Never allow SSH from `0.0.0.0/0` in production!
+**Security note:** SSH should NEVER be open to `0.0.0.0/0` in production!
 
-### Part 6: Launch EC2 Instance with IMDSv2 (30 minutes)
+---
 
-Now we'll create the actual EC2 instance with enhanced security settings.
+### Part 6: Create User Data Script (30 minutes)
 
-#### 6.1 Understanding IMDSv2 Configuration
+User data is a script that runs automatically when an EC2 instance first boots. We'll use it to install and configure WordPress.
+
+#### 6.1 Understanding User Data
+
+- Runs as `root` user
+- Executes only on first boot (not on restarts)
+- Output logged to `/var/log/cloud-init-output.log`
+- Must start with shebang (`#!/bin/bash`)
+
+#### 6.2 Create the WordPress Installation Script
+
+Create a file called `user_data.sh` in your `student-work/` directory:
+
+```bash
+#!/bin/bash
+# WordPress Installation Script for Amazon Linux 2023
+# This script runs automatically when the EC2 instance first boots
+
+# Log all output for debugging
+exec > /var/log/user-data.log 2>&1
+set -x
+
+echo "=========================================="
+echo "Starting WordPress installation..."
+echo "Time: $(date)"
+echo "=========================================="
+
+# Update system packages
+echo "Updating system packages..."
+dnf update -y
+
+# Install Apache, PHP, and MariaDB
+echo "Installing Apache, PHP, and MariaDB..."
+dnf install -y httpd php php-mysqli php-json php-gd php-mbstring mariadb105-server wget
+
+# Start and enable Apache
+echo "Starting Apache..."
+systemctl start httpd
+systemctl enable httpd
+
+# Start and enable MariaDB
+echo "Starting MariaDB..."
+systemctl start mariadb
+systemctl enable mariadb
+
+# Create WordPress database and user
+echo "Configuring MariaDB for WordPress..."
+mysql -e "CREATE DATABASE wordpress;"
+mysql -e "CREATE USER 'wpuser'@'localhost' IDENTIFIED BY 'WPpassword123!';"
+mysql -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wpuser'@'localhost';"
+mysql -e "FLUSH PRIVILEGES;"
+
+# Download and install WordPress
+echo "Downloading WordPress..."
+cd /var/www/html
+wget -q https://wordpress.org/latest.tar.gz
+tar -xzf latest.tar.gz
+cp -r wordpress/* .
+rm -rf wordpress latest.tar.gz
+
+# Get public IP for WordPress URL configuration (using IMDSv2)
+echo "Getting instance metadata..."
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+echo "Public IP: $PUBLIC_IP"
+
+# Fetch authentication salts from WordPress API
+echo "Fetching authentication salts..."
+curl -s https://api.wordpress.org/secret-key/1.1/salt/ > /tmp/wp-salts.txt
+
+# Create wp-config.php using heredoc (avoids sed issues with special characters)
+echo "Creating wp-config.php..."
+cat > /var/www/html/wp-config.php << 'WPCONFIG_START'
+<?php
+/**
+ * WordPress Configuration File
+ * Generated by user-data script
+ */
+
+// ** Database settings ** //
+define( 'DB_NAME', 'wordpress' );
+define( 'DB_USER', 'wpuser' );
+define( 'DB_PASSWORD', 'WPpassword123!' );
+define( 'DB_HOST', 'localhost' );
+define( 'DB_CHARSET', 'utf8' );
+define( 'DB_COLLATE', '' );
+
+WPCONFIG_START
+
+# Add dynamic URL settings (these need variable expansion)
+cat >> /var/www/html/wp-config.php << WPCONFIG_URLS
+// ** URL settings (prevents login/redirect issues) ** //
+define( 'WP_HOME', 'http://${PUBLIC_IP}' );
+define( 'WP_SITEURL', 'http://${PUBLIC_IP}' );
+
+WPCONFIG_URLS
+
+# Add the salts from WordPress API
+echo "// ** Authentication keys and salts ** //" >> /var/www/html/wp-config.php
+cat /tmp/wp-salts.txt >> /var/www/html/wp-config.php
+echo "" >> /var/www/html/wp-config.php
+
+# Add remaining configuration
+cat >> /var/www/html/wp-config.php << 'WPCONFIG_END'
+// ** Database table prefix ** //
+$table_prefix = 'wp_';
+
+// ** Debugging ** //
+define( 'WP_DEBUG', false );
+
+// ** Absolute path to WordPress directory ** //
+if ( ! defined( 'ABSPATH' ) ) {
+    define( 'ABSPATH', __DIR__ . '/' );
+}
+
+// ** Load WordPress ** //
+require_once ABSPATH . 'wp-settings.php';
+WPCONFIG_END
+
+# Clean up
+rm -f /tmp/wp-salts.txt
+
+# Set proper file permissions
+echo "Setting file permissions..."
+chown -R apache:apache /var/www/html
+chmod -R 755 /var/www/html
+
+# Restart Apache to apply all changes
+echo "Restarting Apache..."
+systemctl restart httpd
+
+echo "=========================================="
+echo "WordPress installation complete!"
+echo "Time: $(date)"
+echo "=========================================="
+echo ""
+echo "Access your site at: http://$PUBLIC_IP"
+echo ""
+echo "Complete the WordPress setup wizard in your browser."
+echo "=========================================="
+```
+
+**What this script does:**
+1. Updates all system packages
+2. Installs Apache web server, PHP, and MariaDB database
+3. Starts and enables services to run on boot
+4. Creates a MySQL database and user for WordPress
+5. Downloads and extracts WordPress
+6. Configures `wp-config.php` with database credentials
+7. Sets proper file ownership and permissions
+8. Uses IMDSv2 to get the public IP for the completion message
+
+---
+
+### Part 7: Launch EC2 Instance (30 minutes)
+
+Now we'll create the EC2 instance that will run WordPress.
+
+#### 7.1 Create the EC2 Instance Resource
+
+Add to `main.tf`:
 
 ```hcl
-# EC2 instance with IMDSv2 required
-resource "aws_instance" "lab_instance" {
-  ami           = data.aws_ami.amazon_linux_2023.id
-  instance_type = var.instance_type
-  key_name      = aws_key_pair.lab_key.key_name
-  
-  vpc_security_group_ids = [aws_security_group.lab_sg.id]
-  
+# EC2 instance running WordPress
+resource "aws_instance" "wordpress" {
+  ami                    = data.aws_ami.amazon_linux_2023.id
+  instance_type          = var.instance_type
+  key_name               = aws_key_pair.wordpress.key_name
+  vpc_security_group_ids = [aws_security_group.wordpress.id]
+
+  # User data script to install WordPress
+  user_data = file("${path.module}/user_data.sh")
+
   # IMDSv2 configuration (enhanced security)
   metadata_options {
     http_endpoint               = "enabled"   # Enable IMDS
@@ -318,24 +563,16 @@ resource "aws_instance" "lab_instance" {
     http_put_response_hop_limit = 1           # Restrict to instance only
     instance_metadata_tags      = "enabled"   # Allow access to instance tags
   }
-  
-  # User data script to install and configure basic tools
-  user_data = <<-EOF
-              #!/bin/bash
-              # Update system
-              yum update -y
-              
-              # Install useful tools
-              yum install -y htop tree
-              
-              # Create a welcome message
-              echo "Welcome to Lab 01 EC2 Instance" > /home/ec2-user/welcome.txt
-              echo "This instance was created with Terraform" >> /home/ec2-user/welcome.txt
-              chown ec2-user:ec2-user /home/ec2-user/welcome.txt
-              EOF
-  
+
+  # Root volume configuration
+  root_block_device {
+    volume_size = 30    # GB - minimum required for AL2023 AMI
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
   tags = {
-    Name         = "Lab 01 EC2 Instance - ${var.student_name}"
+    Name         = "wordpress-${var.student_name}"
     Environment  = "Learning"
     ManagedBy    = "Terraform"
     Student      = var.student_name
@@ -353,65 +590,56 @@ resource "aws_instance" "lab_instance" {
 | `http_put_response_hop_limit` | `1` | Prevent IP forwarding attacks |
 | `instance_metadata_tags` | `enabled` | Allow querying instance tags via IMDS |
 
-**Understanding user_data:**
-- Runs once when instance first launches
-- Must start with `#!/bin/bash` (shebang)
-- Useful for initial configuration, installing software
-- Logs available at `/var/log/cloud-init-output.log`
+---
 
-### Part 7: Create Outputs (15 minutes)
+### Part 8: Create Outputs (15 minutes)
 
 Outputs display useful information after `terraform apply`.
 
 Create `outputs.tf`:
 
 ```hcl
-# Output the instance ID
 output "instance_id" {
-  description = "ID of the EC2 instance"
-  value       = aws_instance.lab_instance.id
+  description = "ID of the WordPress EC2 instance"
+  value       = aws_instance.wordpress.id
 }
 
-# Output the public IP
-output "instance_public_ip" {
-  description = "Public IP address of the EC2 instance"
-  value       = aws_instance.lab_instance.public_ip
+output "public_ip" {
+  description = "Public IP address of the WordPress server"
+  value       = aws_instance.wordpress.public_ip
 }
 
-# Output the public DNS
-output "instance_public_dns" {
-  description = "Public DNS name of the EC2 instance"
-  value       = aws_instance.lab_instance.public_dns
+output "public_dns" {
+  description = "Public DNS name of the WordPress server"
+  value       = aws_instance.wordpress.public_dns
 }
 
-# Output SSH connection command
-output "ssh_connection_command" {
-  description = "Command to SSH into the instance"
-  value       = "ssh -i ~/.ssh/terraform-lab-01 ec2-user@${aws_instance.lab_instance.public_ip}"
+output "wordpress_url" {
+  description = "URL to access WordPress"
+  value       = "http://${aws_instance.wordpress.public_ip}"
 }
 
-# Output the AMI ID used
+output "ssh_command" {
+  description = "SSH command to connect to the instance"
+  value       = "ssh -i ~/.ssh/wordpress-lab ec2-user@${aws_instance.wordpress.public_ip}"
+}
+
 output "ami_id" {
   description = "AMI ID used for the instance"
   value       = data.aws_ami.amazon_linux_2023.id
 }
 
-# Output the key pair name
-output "key_pair_name" {
-  description = "Name of the SSH key pair"
-  value       = aws_key_pair.lab_key.key_name
-}
-
-# Output security group ID
 output "security_group_id" {
   description = "ID of the security group"
-  value       = aws_security_group.lab_sg.id
+  value       = aws_security_group.wordpress.id
 }
 ```
 
-### Part 8: Deploy Infrastructure (20 minutes)
+---
 
-#### 8.1 Initialize and Validate
+### Part 9: Deploy and Verify (30 minutes)
+
+#### 9.1 Initialize and Validate
 
 ```bash
 # Format code
@@ -424,7 +652,7 @@ terraform init
 terraform validate
 ```
 
-#### 8.2 Review Plan
+#### 9.2 Review Plan
 
 ```bash
 terraform plan
@@ -433,10 +661,11 @@ terraform plan
 **What to look for in the plan:**
 - 3 resources to create: key_pair, security_group, instance
 - 1 data source to read: AMI
-- Check that security group uses your IP
-- Verify IMDSv2 settings are correct
+- Security group has 3 ingress rules (SSH, HTTP, HTTPS) and 1 egress rule
+- Instance uses your key pair and security group
+- IMDSv2 settings are correct (`http_tokens = "required"`)
 
-#### 8.3 Deploy
+#### 9.3 Deploy
 
 ```bash
 terraform apply
@@ -450,143 +679,157 @@ Apply complete! Resources: 3 added, 0 changed, 0 destroyed.
 
 Outputs:
 
-ami_id = "ami-0c55b159cbfafe1f0"
+ami_id = "ami-0abcdef1234567890"
 instance_id = "i-0abcd1234efgh5678"
-instance_public_ip = "54.123.45.67"
-instance_public_dns = "ec2-54-123-45-67.compute-1.amazonaws.com"
-key_pair_name = "terraform-lab-01-yourname"
+public_dns = "ec2-54-123-45-67.compute-1.amazonaws.com"
+public_ip = "54.123.45.67"
 security_group_id = "sg-0123456789abcdef0"
-ssh_connection_command = "ssh -i ~/.ssh/terraform-lab-01 ec2-user@54.123.45.67"
+ssh_command = "ssh -i ~/.ssh/wordpress-lab ec2-user@54.123.45.67"
+wordpress_url = "http://54.123.45.67"
 ```
 
-**Wait 1-2 minutes** for the instance to fully boot before attempting SSH.
+#### 9.4 Wait for WordPress Installation
 
-### Part 9: Verify and Test (30 minutes)
+**IMPORTANT:** The user data script takes 2-3 minutes to complete. The instance will be "running" almost immediately, but WordPress won't be ready yet.
 
-#### 9.1 Check Instance Status
-
+**Check instance status:**
 ```bash
-# Via Terraform
-terraform show | grep instance_state
-
 # Via AWS CLI
 aws ec2 describe-instances \
   --instance-ids $(terraform output -raw instance_id) \
-  --query 'Reservations[0].Instances[0].State.Name'
+  --query 'Reservations[0].Instances[0].State.Name' \
+  --output text
 ```
 
-Should show: `"running"`
+Should show: `running`
 
-#### 9.2 Test SSH Connection
+#### 9.5 Access WordPress
 
-Use the command from outputs:
+After waiting 2-3 minutes, open your browser and go to:
 
 ```bash
-# Get the SSH command
-terraform output ssh_connection_command
-
-# Or manually
-ssh -i ~/.ssh/terraform-lab-01 ec2-user@$(terraform output -raw instance_public_ip)
+# Get the URL
+terraform output wordpress_url
 ```
 
-**On Windows PowerShell:**
-```powershell
-$IP = terraform output -raw instance_public_ip
-ssh -i $env:USERPROFILE\.ssh\terraform-lab-01 ec2-user@$IP
+You should see the WordPress installation wizard!
+
+**Complete the WordPress setup:**
+1. Select your language
+2. Enter site title, admin username, password, and email
+3. Click "Install WordPress"
+4. Log in with your new credentials
+
+**Congratulations!** You've deployed WordPress using Terraform!
+
+---
+
+### Part 10: SSH and IMDS Exploration (30 minutes)
+
+Now let's connect to the instance and explore.
+
+#### 10.1 SSH Into Your Instance
+
+```bash
+# Get the SSH command from outputs
+terraform output ssh_command
+
+# Or connect directly
+ssh -i ~/.ssh/wordpress-lab ec2-user@$(terraform output -raw public_ip)
 ```
 
-**If connection is refused:**
+**If connection fails:**
 - Wait another minute (instance still booting)
-- Check security group allows your current IP
-- Verify private key permissions: `chmod 600 ~/.ssh/terraform-lab-01`
+- Check your IP hasn't changed: `curl -s https://checkip.amazonaws.com`
+- Verify private key permissions: `chmod 600 ~/.ssh/wordpress-lab`
 
-**Once connected, you should see:**
+#### 10.2 Check User Data Execution
+
+Once connected, verify the installation completed:
+
+```bash
+# Check the user data log
+sudo cat /var/log/user-data.log
+
+# Check if Apache is running
+sudo systemctl status httpd
+
+# Check if MariaDB is running
+sudo systemctl status mariadb
+
+# Check WordPress files
+ls -la /var/www/html/
 ```
-   ,     #_
-   ~\_  ####_        Amazon Linux 2023
-  ~~  \_#####\
-  ~~     \###|
-  ~~       \#/ ___   https://aws.amazon.com/linux/amazon-linux-2023
-   ~~       V~' '->
-    ~~~         /
-      ~~._.   _/
-         _/ _/
-       _/m/'
 
-Last login: ...
-[ec2-user@ip-10-0-1-123 ~]$
-```
+#### 10.3 Explore IMDSv2
 
-#### 9.3 Test IMDSv2 Configuration
+The Instance Metadata Service provides information about your instance. Let's explore it!
 
-While SSH'd into the instance, test that IMDSv2 is working:
-
-**First, try IMDSv1 (should fail):**
+**First, try IMDSv1 (should FAIL because we required IMDSv2):**
 ```bash
 curl http://169.254.169.254/latest/meta-data/instance-id
 ```
 
-Expected result: No response or error (because we required IMDSv2)
+Expected result: The request hangs or returns nothing (timeout after ~5 seconds).
 
-**Now try IMDSv2 (should work):**
+**Now try IMDSv2 (should WORK):**
 ```bash
-# Get session token
-TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+# Step 1: Get a session token (valid for 6 hours)
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 
-# Use token to get instance ID
-curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id
+# Step 2: Use the token to query metadata
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-id
+
+# You should see your instance ID!
 ```
-
-Should output your instance ID (e.g., `i-0abcd1234efgh5678`)
 
 **Query other metadata:**
 ```bash
 # Instance type
-curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-type
 
 # Availability zone
-curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/placement/availability-zone
 
 # Public IP
-curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/public-ipv4
+
+# Private IP
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/local-ipv4
 
 # AMI ID
-curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/ami-id
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/ami-id
 
-# Instance tags
-curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/tags/instance/Name
+# See all available metadata categories
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/
+
+# Instance tags (because we enabled instance_metadata_tags)
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/tags/instance/Name
 ```
 
-#### 9.4 Check User Data Execution
+**What you just learned:**
+- IMDSv2 requires a token obtained via PUT request
+- The token has a TTL (time to live) - we set 6 hours (21600 seconds)
+- All subsequent requests must include the token in a header
+- This prevents SSRF attacks because attackers can't easily forge PUT requests
 
-```bash
-# Check the welcome file created by user data
-cat /home/ec2-user/welcome.txt
-
-# View user data script execution log
-sudo cat /var/log/cloud-init-output.log
-```
-
-#### 9.5 Verify Security Group Rules
-
-From your local machine:
-
-```bash
-# Get security group ID
-SG_ID=$(terraform output -raw security_group_id)
-
-# Describe security group rules
-aws ec2 describe-security-groups --group-ids $SG_ID --query 'SecurityGroups[0].IpPermissions'
-```
-
-Should show SSH (port 22) allowed from your IP only.
-
-**Exit the SSH session:**
+**Exit SSH when done:**
 ```bash
 exit
 ```
 
-### Part 10: Run Cost Analysis (10 minutes)
+---
+
+### Part 11: Run Cost Analysis (10 minutes)
 
 Before considering your work complete, check costs:
 
@@ -594,53 +837,16 @@ Before considering your work complete, check costs:
 infracost breakdown --path .
 ```
 
-**Expected monthly cost:** ~$7-8 for a t3.micro running 24/7
+**Expected monthly cost:** ~$8-10 for a t3.micro running 24/7
 
 **Cost breakdown:**
 - t3.micro instance: ~$7.59/month (730 hours × $0.0104/hour)
+- EBS storage (30 GB gp3): ~$2.40/month
 - Data transfer: Minimal for this lab
-- EBS storage: Included in instance pricing
 
 **Remember:** Resources tagged with `AutoTeardown = "8h"` will be automatically destroyed after 8 hours!
 
-### Part 11: Document Your Work (15 minutes)
-
-Create a simple `README.md` in your `student-work/` directory:
-
-```markdown
-# Lab 01 - EC2 Instance Deployment
-
-## What I Built
-
-- EC2 instance running Amazon Linux 2023
-- SSH key pair for secure access
-- Security group restricting SSH to my IP
-- IMDSv2 configuration for enhanced security
-
-## Key Learnings
-
-- How to create and manage SSH key pairs
-- Security group configuration for network access control
-- IMDSv2 vs IMDSv1 differences and benefits
-- Using data sources to query AWS resources
-- EC2 user data for instance initialization
-
-## Resources Created
-
-- 1 EC2 instance (t3.micro)
-- 1 SSH key pair
-- 1 Security group
-
-## Outputs
-
-- Instance ID: `[from terraform output]`
-- Public IP: `[from terraform output]`
-- AMI used: `[from terraform output]`
-
-## Notes
-
-[Add any challenges you faced or interesting observations]
-```
+---
 
 ### Part 12: Submit Your Work (20 minutes)
 
@@ -679,12 +885,12 @@ git status
 #   variables.tf
 #   outputs.tf
 #   backend.tf
-#   README.md (optional)
+#   user_data.sh
 #   .gitignore
-# You should NOT see terraform.tfstate or .terraform/
+# You should NOT see terraform.tfstate, .terraform/, or terraform.tfvars
 
 # Commit
-git commit -m "Week 0 Lab 1 - EC2 with IMDSv2 - [Your Name]"
+git commit -m "Week 0 Lab 1 - WordPress on EC2 - [Your Name]"
 
 # Push
 git push origin week-00-lab-01
@@ -698,19 +904,21 @@ gh pr create --repo YOUR-USERNAME/labs_terraform_course \
   --base main \
   --head week-00-lab-01 \
   --title "Week 0 Lab 1 - [Your Name]" \
-  --body "Completed Lab 1: EC2 instance with IMDSv2, key pairs, and security groups"
+  --body "Completed Lab 1: WordPress on EC2 with security groups, user data, and IMDSv2"
 ```
 
 **Or use GitHub web UI** (remember: PR within your fork, not to main repo!)
 
 The grading workflow will automatically:
 - ✅ Check formatting and validation
+- ✅ Verify security group has all required rules (including egress!)
 - ✅ Verify IMDSv2 is required
-- ✅ Check security group configuration
-- ✅ Verify key pair resource exists
+- ✅ Check for data source usage (not hardcoded AMI)
 - ✅ Run cost analysis
 - ✅ Perform security scanning
 - ✅ Post grade as PR comment
+
+---
 
 ### Part 13: Cleanup (10 minutes)
 
@@ -730,47 +938,46 @@ Type `yes` to confirm.
 # Check no instances remain
 aws ec2 describe-instances \
   --filters "Name=tag:Student,Values=YOUR-USERNAME" \
-  --query 'Reservations[*].Instances[*].[InstanceId,State.Name]'
-
-# Should show empty or terminated instances
+  --query 'Reservations[*].Instances[*].[InstanceId,State.Name]' \
+  --output table
 ```
 
 **Alternative:** Wait 8 hours for auto-teardown to destroy resources automatically.
+
+---
 
 ## Key Concepts Learned
 
 ### 1. EC2 Instance Components
 
-- **AMI**: Template for the instance (OS and software)
-- **Instance Type**: Hardware specifications (CPU, RAM, network)
+- **AMI**: Template for the instance (OS and pre-installed software)
+- **Instance Type**: Hardware specifications (t3.micro = 2 vCPU, 1 GB RAM)
 - **Key Pair**: SSH authentication mechanism
 - **Security Group**: Virtual firewall rules
-- **User Data**: Initialization script
+- **User Data**: Initialization script that runs on first boot
 
-### 2. Security Best Practices
+### 2. Security Group Best Practices
 
-- ✅ Restrict SSH to specific IPs (never `0.0.0.0/0`)
-- ✅ Use IMDSv2 (not IMDSv1) for metadata access
-- ✅ Use SSH keys (never passwords)
-- ✅ Set `http_put_response_hop_limit = 1` to prevent IP forwarding
-- ✅ Keep private keys secret and local
+- ✅ Restrict SSH to specific IPs (never use `0.0.0.0/0` for SSH)
+- ✅ Always define explicit egress rules in Terraform
+- ✅ Use descriptive names and descriptions
+- ✅ Open only necessary ports (principle of least privilege)
 
-### 3. Terraform Features Used
+### 3. User Data Scripts
 
-- **Data Sources**: Query existing AWS resources (`data "aws_ami"`)
-- **Resource Dependencies**: Automatic ordering based on references
-- **Variables**: Make code reusable (`var.student_name`)
-- **Outputs**: Extract and display useful information
-- **Functions**: `file()` to read local files
+- Run as root on first boot only
+- Output logged to `/var/log/cloud-init-output.log`
+- Must be idempotent (safe to run multiple times)
+- Use `set -x` for debugging (logs all commands)
 
 ### 4. IMDSv2 Security
 
 **What is IMDS?**
 Instance Metadata Service provides information about your EC2 instance:
 - Instance ID, type, AMI
-- IAM credentials
-- User data
+- IAM credentials (if an IAM role is attached)
 - Network configuration
+- User data
 
 **Why IMDSv2?**
 IMDSv1 was vulnerable to SSRF attacks. IMDSv2 requires:
@@ -780,194 +987,140 @@ IMDSv1 was vulnerable to SSRF attacks. IMDSv2 requires:
 
 This prevents attackers from tricking web applications into revealing credentials.
 
-**Configuration we used:**
-```hcl
-metadata_options {
-  http_endpoint               = "enabled"   # Turn on IMDS
-  http_tokens                 = "required"  # Require session token (IMDSv2)
-  http_put_response_hop_limit = 1           # One hop only (no IP forwarding)
-  instance_metadata_tags      = "enabled"   # Allow tag access
-}
-```
+### 5. Data Sources vs Resources
+
+- **Resources** (`resource`): Create, update, or delete infrastructure
+- **Data Sources** (`data`): Query existing infrastructure (read-only)
+
+Using data sources for AMIs ensures you always get the latest version.
+
+---
 
 ## Troubleshooting
 
-### SSH Connection Issues
+### WordPress Page Not Loading
 
-**"Connection refused"**
+**Symptom:** Browser shows connection timeout or error
+
+**Solutions:**
+1. **Wait longer** - User data takes 2-3 minutes
+2. **Check user data log:**
+   ```bash
+   ssh -i ~/.ssh/wordpress-lab ec2-user@$(terraform output -raw public_ip)
+   sudo cat /var/log/user-data.log
+   ```
+3. **Check security group** - Verify HTTP (port 80) is allowed
+4. **Check egress rule** - If missing, the instance can't download packages!
+
+### SSH Connection Refused
+
+**Solutions:**
 - Wait 1-2 minutes for instance to fully boot
-- Check security group allows your IP
-- Verify instance is running: `aws ec2 describe-instances --instance-ids $(terraform output -raw instance_id)`
+- Verify your IP: `curl -s https://checkip.amazonaws.com`
+- Update `terraform.tfvars` if your IP changed, then `terraform apply`
+- Check instance is running: `terraform output instance_id`
 
-**"Permission denied (publickey)"**
-- Check private key permissions: `chmod 600 ~/.ssh/terraform-lab-01`
-- Verify you're using the correct key: `-i ~/.ssh/terraform-lab-01`
-- Check username is `ec2-user` (for Amazon Linux)
+### Permission Denied (publickey)
 
-**"Network error: Connection timed out"**
-- Verify your public IP hasn't changed
-- Update security group with new IP if needed
-- Check you're using public IP (not private): `terraform output instance_public_ip`
-
-### Security Group Issues
-
-**Can't SSH from different location**
-- Your IP changed - update `terraform.tfvars` with new IP
-- Run `terraform apply` to update security group
-- Or add additional CIDR blocks to security group
-
-**Want to allow multiple IPs**
-```hcl
-cidr_blocks = [
-  "203.0.113.42/32",  # Home IP
-  "198.51.100.17/32", # Office IP
-]
-```
-
-### IMDSv1 Not Working
-
-**This is expected!** We configured the instance to require IMDSv2. If IMDSv1 works, something is wrong with your configuration.
-
-**Verify IMDSv2 is required:**
+**Solutions:**
 ```bash
-aws ec2 describe-instances \
-  --instance-ids $(terraform output -raw instance_id) \
-  --query 'Reservations[0].Instances[0].MetadataOptions.HttpTokens'
+# Fix private key permissions
+chmod 600 ~/.ssh/wordpress-lab
+
+# Verify correct key path
+ls -la ~/.ssh/wordpress-lab
+
+# Verify username is ec2-user (for Amazon Linux)
+ssh -i ~/.ssh/wordpress-lab ec2-user@...
 ```
 
-Should output: `"required"`
+### User Data Script Failed
 
-### Terraform Errors
+**Symptom:** Apache or MariaDB not running, WordPress files missing
 
-**"Error: error creating EC2 Key Pair: InvalidKeyPair.Duplicate"**
-- A key pair with that name already exists
-- Either use a different name or delete the existing one:
+**Debug steps:**
 ```bash
-aws ec2 delete-key-pair --key-name terraform-lab-01-yourname
+# SSH into instance
+ssh -i ~/.ssh/wordpress-lab ec2-user@$(terraform output -raw public_ip)
+
+# Check the log
+sudo cat /var/log/user-data.log
+
+# Check cloud-init status
+sudo cloud-init status
+
+# Try running commands manually to see errors
+sudo systemctl status httpd
+sudo systemctl status mariadb
 ```
 
-**"Error: Error launching source instance: InvalidAMIID.NotFound"**
-- The AMI ID doesn't exist in your region
-- Make sure you're using the data source (not a hardcoded AMI)
-- Verify you're in us-east-1
+### "Instance can't reach internet"
 
-**"InvalidGroup.NotFound" when applying**
-- Security group was deleted outside Terraform
-- Run `terraform refresh` to update state
-- Then `terraform apply` to recreate
+**Cause:** Missing egress rule in security group
 
-## Advanced Challenges (Optional)
-
-Want to go further? Try these:
-
-### Challenge 1: Multiple Instances
-
-Deploy 2 instances with a single configuration using `count`:
-
+**Solution:** Make sure your security group has:
 ```hcl
-resource "aws_instance" "lab_instance" {
-  count = 2
-  
-  ami           = data.aws_ami.amazon_linux_2023.id
-  instance_type = var.instance_type
-  # ... rest of config
-  
-  tags = {
-    Name = "Lab 01 Instance ${count.index + 1} - ${var.student_name}"
-    # ... other tags
-  }
+egress {
+  from_port   = 0
+  to_port     = 0
+  protocol    = "-1"
+  cidr_blocks = ["0.0.0.0/0"]
 }
 ```
 
-### Challenge 2: Install Web Server
+Then run `terraform apply` to update.
 
-Modify user_data to install and start nginx:
+### IMDSv1 Working (Should Not Be)
 
+**Problem:** You can query IMDS without a token
+
+**Solution:** Verify in `main.tf`:
 ```hcl
-user_data = <<-EOF
-            #!/bin/bash
-            yum update -y
-            yum install -y nginx
-            systemctl start nginx
-            systemctl enable nginx
-            echo "<h1>Hello from $(hostname -f)</h1>" > /usr/share/nginx/html/index.html
-            EOF
-```
-
-Add HTTP (port 80) to security group and test with: `curl http://$(terraform output -raw instance_public_ip)`
-
-### Challenge 3: EBS Volume
-
-Add a separate EBS volume:
-
-```hcl
-resource "aws_ebs_volume" "lab_volume" {
-  availability_zone = aws_instance.lab_instance.availability_zone
-  size              = 10  # GB
-  
-  tags = {
-    Name = "Lab 01 Volume - ${var.student_name}"
-    # ... other tags
-  }
-}
-
-resource "aws_volume_attachment" "lab_attachment" {
-  device_name = "/dev/sdf"
-  volume_id   = aws_ebs_volume.lab_volume.id
-  instance_id = aws_instance.lab_instance.id
+metadata_options {
+  http_tokens = "required"  # Must be "required" not "optional"
 }
 ```
 
-### Challenge 4: Custom VPC
+Run `terraform apply` to update the instance.
 
-Instead of using the default VPC, create your own:
+---
 
-```hcl
-resource "aws_vpc" "lab_vpc" {
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-  
-  tags = {
-    Name = "Lab 01 VPC - ${var.student_name}"
-    # ... other tags
-  }
-}
+## Your Complete File Structure
 
-resource "aws_subnet" "lab_subnet" {
-  vpc_id                  = aws_vpc.lab_vpc.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = "us-east-1a"
-  map_public_ip_on_launch = true
-  
-  tags = {
-    Name = "Lab 01 Subnet - ${var.student_name}"
-    # ... other tags
-  }
-}
+After completing this lab, your `student-work/` directory should contain:
 
-# Internet Gateway, route table, etc.
+```
+week-00/lab-01/student-work/
+├── .gitignore              # Prevents committing sensitive files
+├── backend.tf              # S3 backend configuration
+├── main.tf                 # Resources (key pair, security group, EC2)
+├── variables.tf            # Input variables
+├── outputs.tf              # Output values
+├── user_data.sh            # WordPress installation script
+└── terraform.tfvars        # Variable values (NOT committed to Git)
 ```
 
-## Additional Resources
+**NOT included in Git:**
+- `terraform.tfstate` (stored in S3)
+- `terraform.tfstate.backup`
+- `.terraform/` directory
+- `terraform.tfvars`
 
-- [AWS EC2 Instance Types](https://aws.amazon.com/ec2/instance-types/)
-- [AWS Instance Metadata Service](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-metadata.html)
-- [IMDSv2 Security Best Practices](https://aws.amazon.com/blogs/security/defense-in-depth-open-firewalls-reverse-proxies-ssrf-vulnerabilities-ec2-instance-metadata-service/)
-- [Terraform AWS Provider: aws_instance](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/instance)
-- [Amazon Linux 2023 User Guide](https://docs.aws.amazon.com/linux/al2023/ug/what-is-amazon-linux.html)
+---
 
 ## Next Steps
 
-Proceed to Week 1 labs where you'll learn about:
-- Load balancers
-- Auto scaling groups
-- RDS databases
-- VPC networking
+In Week 1, you'll learn about:
+- Terraform modules for reusability
+- Testing Terraform configurations
+- VPC networking fundamentals
+- High availability architectures
+
+---
 
 ## Support
 
-- Check the [troubleshooting section](#troubleshooting) above
+- Check the troubleshooting section above
 - Review workflow logs in GitHub Actions
 - Post questions in course discussion forum
-- Tag instructor: `@jlgore` in PR comments
+- Tag instructor in PR: `@jlgore`
