@@ -2,11 +2,11 @@
 
 ## Objective
 
-Deploy a fully functional WordPress site on a single EC2 instance with local MariaDB. This lab teaches EC2 fundamentals including security groups, user data scripts, SSH key management, and the Instance Metadata Service (IMDS).
+Deploy a fully functional WordPress site on a single EC2 instance with local MariaDB. This lab teaches EC2 fundamentals including security groups, user data scripts, SSH key management, and the Instance Metadata Service (IMDS). Along the way, you'll develop a solid understanding of Terraform's type system.
 
 ## Estimated Time
 
-2-3 hours
+3-4 hours
 
 ## Prerequisites
 
@@ -20,6 +20,7 @@ Deploy a fully functional WordPress site on a single EC2 instance with local Mar
 ## Learning Outcomes
 
 By completing this lab, you will:
+- **Understand Terraform's type system** and how it prevents configuration errors
 - Create and configure EC2 instances with Terraform
 - Write and use user data scripts for application bootstrapping
 - Configure security groups with appropriate ingress/egress rules
@@ -27,33 +28,236 @@ By completing this lab, you will:
 - Generate and use SSH key pairs for secure instance access
 - Deploy a working WordPress site accessible via browser
 - Use the Instance Metadata Service v2 (IMDSv2) to query instance information
-- Troubleshoot common EC2 and application deployment issues
+- **Navigate AWS provider documentation** to find type information
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│              Default VPC                    │
-│  ┌───────────────────────────────────────┐  │
-│  │         Public Subnet                 │  │
-│  │  ┌─────────────────────────────────┐  │  │
-│  │  │       EC2 (t3.micro)            │  │  │
-│  │  │  ┌───────────────────────────┐  │  │  │
-│  │  │  │   Amazon Linux 2023       │  │  │  │
-│  │  │  │   Apache + PHP            │  │  │  │
-│  │  │  │   MariaDB (localhost)     │  │  │  │
-│  │  │  │   WordPress               │  │  │  │
-│  │  │  └───────────────────────────┘  │  │  │
-│  │  └─────────────────────────────────┘  │  │
-│  │              │                        │  │
-│  │     Security Group                    │  │
-│  │     - SSH (22) from your IP           │  │
-│  │     - HTTP (80) from anywhere         │  │
-│  │     - HTTPS (443) from anywhere       │  │
-│  │     - All outbound traffic            │  │
-│  └───────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            Default VPC                                  │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │                        Public Subnet                              │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │                    EC2 (t3.micro)                           │  │  │
+│  │  │  ┌───────────────────────────────────────────────────────┐  │  │  │
+│  │  │  │   Amazon Linux 2023                                   │  │  │  │
+│  │  │  │   Apache + PHP                                        │  │  │  │
+│  │  │  │   MariaDB (localhost)                                 │  │  │  │
+│  │  │  │   WordPress                                           │  │  │  │
+│  │  │  └───────────────────────────────────────────────────────┘  │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  │                            │                                      │  │
+│  │                   Security Group                                  │  │
+│  │                   - SSH (22) from your IP                         │  │
+│  │                   - HTTP (80) from anywhere                       │  │
+│  │                   - HTTPS (443) from anywhere                     │  │
+│  │                   - All outbound traffic                          │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Background: Understanding Terraform Types
+
+Before we dive into building infrastructure, let's understand how Terraform thinks about data. Every value in Terraform has a **type**, and understanding types will help you:
+- Write correct configurations faster
+- Debug errors more effectively
+- Read documentation more efficiently
+
+### The Primitive Types
+
+Terraform has three primitive (basic) types:
+
+| Type | What it holds | Example values |
+|------|---------------|----------------|
+| `string` | Text | `"t3.micro"`, `"ami-12345"`, `"us-east-1"` |
+| `number` | Numeric values | `22`, `80`, `443`, `30` |
+| `bool` | True or false | `true`, `false` |
+
+### Collection Types
+
+When you need multiple values, you use collections:
+
+| Type | What it holds | Example |
+|------|---------------|---------|
+| `list(type)` | Ordered sequence of same type | `["us-east-1a", "us-east-1b"]` |
+| `set(type)` | Unordered unique values | `toset(["sg-123", "sg-456"])` |
+| `map(type)` | Key-value pairs | `{ Name = "web", Env = "prod" }` |
+
+### Structural Types
+
+For complex data structures:
+
+| Type | What it holds | When to use |
+|------|---------------|-------------|
+| `object({...})` | Named attributes with different types | Configuration objects |
+| `tuple([...])` | Fixed-length sequence with specific types | Rarely used directly |
+
+### Why Types Matter: A Preview
+
+In this lab, you'll encounter these types in real scenarios:
+
+```hcl
+# string - AMI IDs, instance types
+instance_type = "t3.micro"
+
+# number - ports in security groups
+from_port = 22
+to_port   = 22
+
+# bool - enable/disable features
+encrypted = true
+
+# list(string) - CIDR blocks for security rules
+cidr_blocks = ["0.0.0.0/0"]
+
+# map(string) - resource tags
+tags = {
+  Name        = "wordpress-server"
+  Environment = "learning"
+}
+```
+
+### Type Constraints in Variables
+
+When you declare a variable, you specify what type it accepts:
+
+```hcl
+variable "instance_type" {
+  type        = string        # Only accepts text values
+  description = "EC2 instance type"
+  default     = "t3.micro"
+}
+
+variable "enable_encryption" {
+  type        = bool          # Only accepts true or false
+  description = "Enable EBS encryption"
+  default     = true
+}
+
+variable "allowed_ports" {
+  type        = list(number)  # Only accepts a list of numbers
+  description = "Ports to open in security group"
+  default     = [22, 80, 443]
+}
+```
+
+### What Happens When Types Don't Match?
+
+Terraform catches type errors during `plan`:
+
+```
+│ Error: Invalid value for variable
+│
+│   on main.tf line 5:
+│    5:   instance_type = 123
+│
+│ The given value is not suitable for var.instance_type declared at
+│ variables.tf:1,1-27: string required.
+```
+
+This is **good**! Type errors caught during `plan` are much better than runtime failures.
+
+---
+
+## 🔍 Type Scavenger Hunt
+
+Before you start coding, complete this documentation exploration. This builds the research skills you'll need throughout the course and in the certification exam.
+
+**Time**: 20-30 minutes  
+**Where to look**: [AWS Provider Documentation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
+
+### Hunt 1: EC2 Instance Arguments
+
+Navigate to: **Resources > EC2 > aws_instance**
+
+| Find this argument | What type does it expect? | Your answer |
+|--------------------|---------------------------|-------------|
+| `ami` | | |
+| `instance_type` | | |
+| `associate_public_ip_address` | | |
+| `vpc_security_group_ids` | | |
+| `tags` | | |
+| `user_data` | | |
+
+**Hint**: Look at the "Argument Reference" section. The type is often indicated by the description or example values.
+
+---
+
+### Hunt 2: Security Group Arguments
+
+Navigate to: **Resources > VPC > aws_security_group**
+
+| Find this argument | What type does it expect? | Your answer |
+|--------------------|---------------------------|-------------|
+| `name` | | |
+| `description` | | |
+| `ingress` | | |
+| `ingress.from_port` | | |
+| `ingress.cidr_blocks` | | |
+
+**Question**: The `ingress` argument is a special type. What makes it different from a simple `list`?
+
+Your answer: _________________________________________________
+
+---
+
+### Hunt 3: Data Source Return Types
+
+Navigate to: **Data Sources > EC2 > aws_ami**
+
+| Find this attribute | What type does it return? | Your answer |
+|---------------------|---------------------------|-------------|
+| `id` | | |
+| `name` | | |
+| `architecture` | | |
+| `block_device_mappings` | | |
+
+**Question**: Why is understanding return types important when you reference data sources?
+
+Your answer: _________________________________________________
+
+---
+
+### Hunt 4: Metadata Options Block
+
+Navigate to: **Resources > EC2 > aws_instance** and find the `metadata_options` block.
+
+| Find this argument | What type does it expect? | Valid values (if applicable) |
+|--------------------|---------------------------|------------------------------|
+| `http_endpoint` | | |
+| `http_tokens` | | |
+| `http_put_response_hop_limit` | | |
+| `instance_metadata_tags` | | |
+
+**Question**: The `metadata_options` block is an example of which structural type?
+
+Your answer: _________________________________________________
+
+---
+
+### Hunt 5: Type Conversion Functions
+
+Navigate to: [Terraform Functions Documentation](https://developer.hashicorp.com/terraform/language/functions)
+
+Find a function that could convert:
+
+| Conversion needed | Function name | Your answer |
+|-------------------|---------------|-------------|
+| String to number | | |
+| List to set | | |
+| Number to string | | |
+
+---
+
+### Scavenger Hunt Answers
+
+After completing the hunt, check your answers with your neighbor or the instructor. The goal isn't perfection—it's building comfort with documentation navigation.
+
+**Save your answers!** Create a file called `TYPE_HUNT_ANSWERS.md` in your student-work directory.
+
+---
 
 ## Background: Understanding EC2 Components
 
@@ -139,25 +343,39 @@ provider "aws" {
 
 #### 2.2 Create `variables.tf`
 
-Variables make your code reusable and easier to maintain:
+Variables make your code reusable and easier to maintain. **Notice the type constraints** - these prevent configuration errors before deployment:
 
 ```hcl
 variable "student_name" {
   description = "Your GitHub username or student ID"
-  type        = string
+  type        = string  # Must be text, not a number or boolean
 }
 
 variable "instance_type" {
   description = "EC2 instance type"
-  type        = string
+  type        = string  # Examples: "t3.micro", "t3.small"
   default     = "t3.micro"
 }
 
 variable "my_ip" {
   description = "Your public IP address for SSH access (CIDR notation, e.g., 203.0.113.42/32)"
-  type        = string
+  type        = string  # CIDR notation is text, even though it contains numbers
+}
+
+variable "enable_ebs_encryption" {
+  description = "Enable encryption on the root EBS volume"
+  type        = bool    # Only true or false
+  default     = true
+}
+
+variable "root_volume_size" {
+  description = "Size of the root EBS volume in GB"
+  type        = number  # Must be a numeric value, no quotes
+  default     = 30
 }
 ```
+
+**🎯 Type Learning Moment**: Notice how `my_ip` is a `string` even though it looks like numbers? That's because CIDR notation (`192.168.1.1/32`) is text that happens to contain numbers and special characters. Terraform wouldn't know how to do math on an IP address!
 
 #### 2.3 Create `terraform.tfvars`
 
@@ -193,12 +411,12 @@ Add to `main.tf`:
 ```hcl
 # Data source to get the latest Amazon Linux 2023 AMI
 data "aws_ami" "amazon_linux_2023" {
-  most_recent = true
-  owners      = ["amazon"]
+  most_recent = true      # bool - we want the newest matching AMI
+  owners      = ["amazon"] # list(string) - who published this AMI
 
   filter {
-    name   = "name"
-    values = ["al2023-ami-2023*-kernel-*-x86_64"]
+    name   = "name"                              # string
+    values = ["al2023-ami-2023*-kernel-*-x86_64"] # list(string)
   }
 
   filter {
@@ -207,6 +425,12 @@ data "aws_ami" "amazon_linux_2023" {
   }
 }
 ```
+
+**🎯 Type Learning Moment**: Look at the `filter` blocks. Each filter has:
+- `name` = `string` (single value)
+- `values` = `list(string)` (could match multiple patterns)
+
+The documentation tells you `values` expects a list, so even with one value, you use brackets: `["hvm"]`
 
 **Understanding data sources:**
 - `data` blocks query existing resources (they don't create anything)
@@ -264,8 +488,8 @@ Add to `main.tf`:
 ```hcl
 # Import SSH public key to AWS
 resource "aws_key_pair" "wordpress" {
-  key_name   = "wordpress-${var.student_name}"
-  public_key = file("~/.ssh/wordpress-lab.pub")
+  key_name   = "wordpress-${var.student_name}"    # string interpolation
+  public_key = file("~/.ssh/wordpress-lab.pub")   # file() returns string
 
   tags = {
     Name         = "WordPress SSH Key - ${var.student_name}"
@@ -275,6 +499,15 @@ resource "aws_key_pair" "wordpress" {
     AutoTeardown = "8h"
   }
 }
+```
+
+**🎯 Type Learning Moment**: The `tags` argument expects a `map(string)`. Every key AND value must be a string. This works:
+```hcl
+tags = { Name = "web", Port = "80" }  # "80" is a string
+```
+This would fail:
+```hcl
+tags = { Name = "web", Port = 80 }    # 80 is a number - type mismatch!
 ```
 
 **Understanding this resource:**
@@ -325,10 +558,10 @@ resource "aws_security_group" "wordpress" {
   # SSH access from your IP only
   ingress {
     description = "SSH from my IP"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
+    from_port   = 22          # number
+    to_port     = 22          # number
+    protocol    = "tcp"       # string
+    cidr_blocks = [var.my_ip] # list(string) - note the brackets!
   }
 
   # HTTP access from anywhere (for WordPress)
@@ -337,7 +570,7 @@ resource "aws_security_group" "wordpress" {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["0.0.0.0/0"]  # list with one element
   }
 
   # HTTPS access from anywhere (for future SSL)
@@ -356,7 +589,7 @@ resource "aws_security_group" "wordpress" {
     description = "Allow all outbound traffic"
     from_port   = 0
     to_port     = 0
-    protocol    = "-1"  # -1 means all protocols
+    protocol    = "-1"          # "-1" means all protocols (string, not number!)
     cidr_blocks = ["0.0.0.0/0"]
   }
 
@@ -369,6 +602,13 @@ resource "aws_security_group" "wordpress" {
   }
 }
 ```
+
+**🎯 Type Learning Moment**: Look at the port numbers and protocol:
+- `from_port = 22` — This is a `number`, no quotes
+- `protocol = "tcp"` — This is a `string`, with quotes
+- `protocol = "-1"` — Even though -1 looks like a number, the protocol argument expects a `string`!
+
+This is why documentation navigation matters. The docs tell you what type each argument expects.
 
 **Understanding the configuration:**
 - `from_port` and `to_port`: Port range (22 for SSH, 80 for HTTP, etc.)
@@ -548,27 +788,28 @@ Add to `main.tf`:
 ```hcl
 # EC2 instance running WordPress
 resource "aws_instance" "wordpress" {
-  ami                    = data.aws_ami.amazon_linux_2023.id
-  instance_type          = var.instance_type
-  key_name               = aws_key_pair.wordpress.key_name
-  vpc_security_group_ids = [aws_security_group.wordpress.id]
+  ami                    = data.aws_ami.amazon_linux_2023.id  # string from data source
+  instance_type          = var.instance_type                   # string from variable
+  key_name               = aws_key_pair.wordpress.key_name     # string from resource
+  vpc_security_group_ids = [aws_security_group.wordpress.id]   # list(string)!
 
   # User data script to install WordPress
-  user_data = file("${path.module}/user_data.sh")
+  user_data = file("${path.module}/user_data.sh")  # file() returns string
 
   # IMDSv2 configuration (enhanced security)
+  # This is an object/block type with specific attributes
   metadata_options {
-    http_endpoint               = "enabled"   # Enable IMDS
-    http_tokens                 = "required"  # Require IMDSv2 (session tokens)
-    http_put_response_hop_limit = 1           # Restrict to instance only
-    instance_metadata_tags      = "enabled"   # Allow access to instance tags
+    http_endpoint               = "enabled"   # string - not a bool!
+    http_tokens                 = "required"  # string - not a bool!
+    http_put_response_hop_limit = 1           # number
+    instance_metadata_tags      = "enabled"   # string
   }
 
-  # Root volume configuration
+  # Root volume configuration - another nested block
   root_block_device {
-    volume_size = 30    # GB - minimum required for AL2023 AMI
-    volume_type = "gp3"
-    encrypted   = true
+    volume_size = var.root_volume_size  # number from variable
+    volume_type = "gp3"                 # string
+    encrypted   = var.enable_ebs_encryption  # bool from variable
   }
 
   tags = {
@@ -581,14 +822,30 @@ resource "aws_instance" "wordpress" {
 }
 ```
 
+**🎯 Type Learning Moment**: Notice `vpc_security_group_ids`:
+```hcl
+vpc_security_group_ids = [aws_security_group.wordpress.id]
+```
+Even with ONE security group, you need brackets because the argument expects `list(string)`. This is one of the most common errors students make!
+
+**Wrong:**
+```hcl
+vpc_security_group_ids = aws_security_group.wordpress.id  # Error! String, not list
+```
+
+**Right:**
+```hcl
+vpc_security_group_ids = [aws_security_group.wordpress.id]  # List with one element
+```
+
 **Understanding IMDSv2 settings:**
 
-| Setting | Value | Explanation |
-|---------|-------|-------------|
-| `http_endpoint` | `enabled` | Turn on IMDS |
-| `http_tokens` | `required` | Force IMDSv2 (reject IMDSv1 requests) |
-| `http_put_response_hop_limit` | `1` | Prevent IP forwarding attacks |
-| `instance_metadata_tags` | `enabled` | Allow querying instance tags via IMDS |
+| Setting | Type | Value | Explanation |
+|---------|------|-------|-------------|
+| `http_endpoint` | `string` | `"enabled"` | Turn on IMDS |
+| `http_tokens` | `string` | `"required"` | Force IMDSv2 (reject IMDSv1 requests) |
+| `http_put_response_hop_limit` | `number` | `1` | Prevent IP forwarding attacks |
+| `instance_metadata_tags` | `string` | `"enabled"` | Allow querying instance tags via IMDS |
 
 ---
 
@@ -601,12 +858,12 @@ Create `outputs.tf`:
 ```hcl
 output "instance_id" {
   description = "ID of the WordPress EC2 instance"
-  value       = aws_instance.wordpress.id
+  value       = aws_instance.wordpress.id  # Outputs a string
 }
 
 output "public_ip" {
   description = "Public IP address of the WordPress server"
-  value       = aws_instance.wordpress.public_ip
+  value       = aws_instance.wordpress.public_ip  # Outputs a string
 }
 
 output "public_dns" {
@@ -616,7 +873,7 @@ output "public_dns" {
 
 output "wordpress_url" {
   description = "URL to access WordPress"
-  value       = "http://${aws_instance.wordpress.public_ip}"
+  value       = "http://${aws_instance.wordpress.public_ip}"  # String interpolation
 }
 
 output "ssh_command" {
@@ -829,7 +1086,83 @@ exit
 
 ---
 
-### Part 11: Run Cost Analysis (10 minutes)
+### Part 11: Type Error Challenge (Optional - 15 minutes)
+
+Now that you understand types, let's practice debugging type errors. Create a file called `broken_types.tf` and try to fix each error:
+
+```hcl
+# Challenge 1: Fix the type error
+variable "ssh_port" {
+  type    = string
+  default = 22  # Is this the right type for the default?
+}
+
+# Challenge 2: Fix the type error
+variable "enable_monitoring" {
+  type    = bool
+  default = "true"  # Something's wrong here...
+}
+
+# Challenge 3: Fix the type error
+variable "availability_zones" {
+  type    = list(string)
+  default = "us-east-1a"  # Should this be a list?
+}
+
+# Challenge 4: Fix the type error
+variable "instance_tags" {
+  type = map(string)
+  default = {
+    Name = "web-server"
+    Port = 8080  # Is this the right type for a map(string)?
+  }
+}
+```
+
+**How to test:**
+```bash
+terraform validate
+```
+
+Terraform will tell you exactly what's wrong with each one. Fix them until `validate` passes!
+
+<details>
+<summary>Click for solutions</summary>
+
+```hcl
+# Solution 1: Change default to string, or change type to number
+variable "ssh_port" {
+  type    = number  # Changed from string
+  default = 22
+}
+
+# Solution 2: Remove quotes - booleans aren't strings
+variable "enable_monitoring" {
+  type    = bool
+  default = true  # Not "true"
+}
+
+# Solution 3: Wrap in brackets to make it a list
+variable "availability_zones" {
+  type    = list(string)
+  default = ["us-east-1a"]  # Now it's a list
+}
+
+# Solution 4: Convert number to string
+variable "instance_tags" {
+  type = map(string)
+  default = {
+    Name = "web-server"
+    Port = "8080"  # Now it's a string
+  }
+}
+```
+
+</details>
+
+---
+
+### Part 12: Run Cost Analysis (10 minutes)
 
 Before considering your work complete, check costs:
 
@@ -848,9 +1181,9 @@ infracost breakdown --path .
 
 ---
 
-### Part 12: Submit Your Work (20 minutes)
+### Part 13: Submit Your Work (20 minutes)
 
-#### 12.1 Final Checklist
+#### 13.1 Final Checklist
 
 Before submitting, verify:
 
@@ -868,7 +1201,7 @@ infracost breakdown --path .
 terraform output
 ```
 
-#### 12.2 Commit Your Work
+#### 13.2 Commit Your Work
 
 ```bash
 # Create a branch
@@ -886,6 +1219,7 @@ git status
 #   outputs.tf
 #   backend.tf
 #   user_data.sh
+#   TYPE_HUNT_ANSWERS.md (if you created it)
 #   .gitignore
 # You should NOT see terraform.tfstate, .terraform/, or terraform.tfvars
 
@@ -896,7 +1230,7 @@ git commit -m "Week 0 Lab 1 - WordPress on EC2 - [Your Name]"
 git push origin week-00-lab-01
 ```
 
-#### 12.3 Create Pull Request
+#### 13.3 Create Pull Request
 
 **Using GitHub CLI:**
 ```bash
@@ -920,7 +1254,7 @@ The grading workflow will automatically:
 
 ---
 
-### Part 13: Cleanup (10 minutes)
+### Part 14: Cleanup (10 minutes)
 
 After your PR is graded, clean up resources:
 
@@ -948,7 +1282,15 @@ aws ec2 describe-instances \
 
 ## Key Concepts Learned
 
-### 1. EC2 Instance Components
+### 1. Terraform Types
+
+- **Primitives**: `string`, `number`, `bool`
+- **Collections**: `list(type)`, `set(type)`, `map(type)`
+- **Structural**: `object({...})`, blocks
+- Type constraints prevent errors before deployment
+- Documentation tells you what type each argument expects
+
+### 2. EC2 Instance Components
 
 - **AMI**: Template for the instance (OS and pre-installed software)
 - **Instance Type**: Hardware specifications (t3.micro = 2 vCPU, 1 GB RAM)
@@ -956,21 +1298,21 @@ aws ec2 describe-instances \
 - **Security Group**: Virtual firewall rules
 - **User Data**: Initialization script that runs on first boot
 
-### 2. Security Group Best Practices
+### 3. Security Group Best Practices
 
 - ✅ Restrict SSH to specific IPs (never use `0.0.0.0/0` for SSH)
 - ✅ Always define explicit egress rules in Terraform
 - ✅ Use descriptive names and descriptions
 - ✅ Open only necessary ports (principle of least privilege)
 
-### 3. User Data Scripts
+### 4. User Data Scripts
 
 - Run as root on first boot only
 - Output logged to `/var/log/cloud-init-output.log`
 - Must be idempotent (safe to run multiple times)
 - Use `set -x` for debugging (logs all commands)
 
-### 4. IMDSv2 Security
+### 5. IMDSv2 Security
 
 **What is IMDS?**
 Instance Metadata Service provides information about your EC2 instance:
@@ -987,7 +1329,7 @@ IMDSv1 was vulnerable to SSRF attacks. IMDSv2 requires:
 
 This prevents attackers from tricking web applications into revealing credentials.
 
-### 5. Data Sources vs Resources
+### 6. Data Sources vs Resources
 
 - **Resources** (`resource`): Create, update, or delete infrastructure
 - **Data Sources** (`data`): Query existing infrastructure (read-only)
@@ -997,6 +1339,17 @@ Using data sources for AMIs ensures you always get the latest version.
 ---
 
 ## Troubleshooting
+
+### Type Errors in `terraform plan`
+
+**Symptom:** Error message mentions "string required" or similar
+
+**Solution:**
+1. Check the documentation for the expected type
+2. Common fixes:
+   - Add quotes for strings: `"t3.micro"` not `t3.micro`
+   - Remove quotes for numbers/bools: `22` not `"22"`, `true` not `"true"`
+   - Add brackets for lists: `["sg-123"]` not `"sg-123"`
 
 ### WordPress Page Not Loading
 
@@ -1094,9 +1447,10 @@ week-00/lab-01/student-work/
 ├── .gitignore              # Prevents committing sensitive files
 ├── backend.tf              # S3 backend configuration
 ├── main.tf                 # Resources (key pair, security group, EC2)
-├── variables.tf            # Input variables
+├── variables.tf            # Input variables with type constraints
 ├── outputs.tf              # Output values
 ├── user_data.sh            # WordPress installation script
+├── TYPE_HUNT_ANSWERS.md    # Your scavenger hunt answers (optional)
 └── terraform.tfvars        # Variable values (NOT committed to Git)
 ```
 
@@ -1105,6 +1459,7 @@ week-00/lab-01/student-work/
 - `terraform.tfstate.backup`
 - `.terraform/` directory
 - `terraform.tfvars`
+- `broken_types.tf` (challenge file)
 
 ---
 
@@ -1115,6 +1470,8 @@ In Week 1, you'll learn about:
 - Testing Terraform configurations
 - VPC networking fundamentals
 - High availability architectures
+
+The type knowledge you built here will be essential when working with complex module inputs!
 
 ---
 
