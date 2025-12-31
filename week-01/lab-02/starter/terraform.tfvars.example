@@ -1,0 +1,16 @@
+# week-01/lab-02/starter/terraform.tfvars.example
+# Example values for terraform.tfvars
+# Copy this file to terraform.tfvars and customize
+
+# Your information
+student_name = "your-github-username"
+
+# TODO: Add values for other variables you create
+# Examples:
+# aws_region = "us-east-1"
+# environment = "dev"
+# project_name = "my-wordpress"
+# key_name = "your-key-pair-name"
+
+# SECURITY NOTE: Never commit terraform.tfvars to git!
+# It may contain sensitive information like passwords and IP addresses
